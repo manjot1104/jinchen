@@ -1,0 +1,9 @@
+{
+  "kind": "receipt",
+  "id": "C-EX-1",
+  "work_order": "WO-2401",
+  "item": "CR-100",
+  "qty": 40,
+  "uom": "Nos",
+  "batch": "B-EX-1"
+}

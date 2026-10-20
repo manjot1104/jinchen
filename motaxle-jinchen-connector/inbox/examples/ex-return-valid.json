@@ -1,0 +1,10 @@
+{
+  "kind": "return",
+  "id": "R-EX-1",
+  "work_order": "WO-2401",
+  "against": "J-100",
+  "item": "ST-20",
+  "qty": 4,
+  "uom": "Kg",
+  "batch": "H-441"
+}
