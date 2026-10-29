@@ -1,0 +1,9 @@
+{
+  "kind": "disposition",
+  "id": "D-RW",
+  "work_order": "WO-2401",
+  "item": "CR-100",
+  "qty": 1,
+  "decision": "rework",
+  "reason": "rework-bend"
+}
