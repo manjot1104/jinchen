@@ -1,0 +1,11 @@
+{
+  "kind": "return",
+  "id": "R-SCRAP",
+  "work_order": "WO-2401",
+  "against": "J-100",
+  "item": "ST-20",
+  "qty": 1,
+  "uom": "Kg",
+  "batch": "H-441",
+  "as_scrap": true
+}
