@@ -1,9 +1,0 @@
-{
-  "kind": "disposition",
-  "id": "D-EX-REJ",
-  "work_order": "WO-2401",
-  "item": "CR-100",
-  "qty": 2,
-  "decision": "rejection",
-  "reason": "forge-crack"
-}
