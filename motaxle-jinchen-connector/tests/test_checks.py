@@ -35,16 +35,18 @@ class ValidationChecks(unittest.TestCase):
         self.assertEqual(result.code, expected_code)
         self.assertEqual(connector.kg(), before_kg)
         self.assertEqual(connector.pieces(), before_pieces)
+        self.assertEqual(connector.pieces()["finished"], 0)
+        self.assertEqual(connector.ledger.capa, 0)
         self.assertEqual(len(connector.ledger.entries), before_entries)
 
     def test_wrong_uom(self):
         self.assert_rejected_without_stock_change(
-            issue(uom="Nos"), "E-UOM"
+            issue(qty=1, uom="Nos", id="J-UOM"), "E-UOM"
         )
 
     def test_wrong_warehouse(self):
         self.assert_rejected_without_stock_change(
-            issue(from_warehouse="Wrong Warehouse"), "E-WH"
+            issue(qty=1, from_warehouse="Finished Goods Store", id="J-WH"), "E-WH"
         )
 
     def test_insufficient_stock(self):
@@ -81,8 +83,8 @@ class ValidationChecks(unittest.TestCase):
         }, "E-REASON")
 
     def test_scrap_return_rejected(self):
+        # Fresh connector, no issue first: the flag is refused before the quantity.
         connector = Connector()
-        connector.process(issue())
         before_kg = connector.kg().copy()
         before_entries = len(connector.ledger.entries)
 
@@ -95,6 +97,7 @@ class ValidationChecks(unittest.TestCase):
 
         self.assertEqual(result.code, "E-REASON")
         self.assertEqual(connector.kg(), before_kg)
+        self.assertEqual(connector.kg()["raw"], 500)
         self.assertEqual(len(connector.ledger.entries), before_entries)
 
     def test_missing_id(self):
@@ -117,8 +120,8 @@ class ValidationChecks(unittest.TestCase):
     def test_return_before_issue_is_rejected(self):
         self.assert_rejected_without_stock_change({
             "kind": "return", "id": "R-EARLY",
-            "work_order": "WO-2401", "against": "J-MISSING",
-            "item": "ST-20", "qty": 1, "uom": "Kg", "batch": "H-441",
+            "work_order": "WO-2401", "against": "J-100",
+            "item": "ST-20", "qty": 1, "batch": "H-441",
         }, "E-ITEM")
 
     def test_return_above_quantity_still_out_is_rejected(self):
@@ -197,6 +200,8 @@ class ValidationChecks(unittest.TestCase):
         self.assertEqual(first.status, "Posted")
         self.assertEqual(second.code, "E-DUP")
         self.assertEqual(connector.pieces(), before_pieces)
+        self.assertEqual(connector.pieces()["rejection"], 2)
+        self.assertEqual(connector.ledger.capa, 0)
         self.assertEqual(len(connector.ledger.entries), before_entries)
 
     def test_operation_30_is_ignored_without_stock_entry(self):
