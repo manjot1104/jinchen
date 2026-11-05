@@ -1,0 +1,10 @@
+{
+  "kind": "confirm",
+  "id": "CF-10",
+  "work_order": "WO-2401",
+  "operation": 10,
+  "completed": 100,
+  "rejected": 0,
+  "rework": 0,
+  "scrap": 0
+}

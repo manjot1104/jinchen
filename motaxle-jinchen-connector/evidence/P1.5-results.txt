@@ -1,0 +1,5 @@
+1. **After J-100 issue:** Raw = 380 kg, WIP = 120 kg, stock entries = 1.
+2. **After duplicate J-100:** Code = E-DUP, Raw = 380 kg, WIP = 120 kg, stock entries = 1.
+3. **After R-1 return:** Raw = 384 kg, WIP = 116 kg, stock entries = 2.
+4. **After cutting confirmation:** Finished goods = 0.
+5. **After receipts C-1 and C-2:** Hold = 96, Finished goods = 0, stock entries = 7, CAPA = 0.
