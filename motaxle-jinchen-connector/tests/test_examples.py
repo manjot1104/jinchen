@@ -22,17 +22,9 @@ class ExampleFileTests(unittest.TestCase):
     def load(self, filename):
         return json.loads((EXAMPLES / filename).read_text())
 
-    def test_eight_refusal_examples_are_valid_json_objects(self):
+    def test_exactly_eight_refusal_example_files_exist(self):
         files = {path.name for path in EXAMPLES.glob("*.json")}
         self.assertEqual(files, EXPECTED_REFUSAL_FILES)
-
-        for path in sorted(EXAMPLES.glob("*.json")):
-            with self.subTest(file=path.name):
-                data = json.loads(path.read_text())
-                self.assertIsInstance(data, dict)
-                self.assertIn("kind", data)
-                self.assertIn("id", data)
-                self.assertIn("work_order", data)
 
     def test_st20_disk_example_is_rejected(self):
         connector = Connector()

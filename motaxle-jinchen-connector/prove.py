@@ -179,6 +179,7 @@ def main():
         equal(found["heat"], "H-441", "B-2 heat")
         equal(found["work_order"], "WO-2401", "B-2 work order")
         equal(c.lookup("H441")["result"], "missing", "near-match lookup")
+        print("B-2 found with heat H-441")
 
     check("11", "finished-goods receipt is blocked and batch trace is exact", tc11)
 

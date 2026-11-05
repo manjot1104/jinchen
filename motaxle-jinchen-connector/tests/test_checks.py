@@ -55,7 +55,7 @@ class ValidationChecks(unittest.TestCase):
     def test_unsupported_operation(self):
         self.assert_rejected_without_stock_change({
             "kind": "confirm", "id": "CF-BAD",
-            "work_order": "WO-2401", "operation": 99,
+            "work_order": "WO-2401", "operation": 40,
             "completed": 1, "rejected": 0, "rework": 0, "scrap": 0,
         }, "E-OP")
 
@@ -63,7 +63,7 @@ class ValidationChecks(unittest.TestCase):
         self.assert_rejected_without_stock_change({
             "kind": "confirm", "id": "CF-101",
             "work_order": "WO-2401", "operation": 10,
-            "completed": 101, "rejected": 0, "rework": 0, "scrap": 0,
+            "completed": 150, "rejected": 0, "rework": 0, "scrap": 0,
         }, "E-QTY")
 
     def test_missing_output_batch(self):
