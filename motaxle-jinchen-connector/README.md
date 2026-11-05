@@ -19,3 +19,7 @@ python3 -m unittest tests/test_poc.py
 ```
 
 A pass prints raw 380 after a repeated J-100, finished goods 0 after cutting, hold 96, and a lookup from batch B-1 back to heat H-441.
+
+## Prove
+
+`python3 prove.py` prints `ALL PASS`.
