@@ -1,21 +1,71 @@
-# Motaxle Jinchen practical POC stand-in
+# Motaxle–Jinchen Practical POC
 
-This runs the story in `Motaxle-Jinchen-Practical-POC.pdf` on this machine.
+This project demonstrates the Motaxle–Jinchen integration workflow using a local POC stand-in.
 
-ERPNext stock is an in-memory ledger. Jinchen is the message in `demo.py`. Nothing is sent to a network. The JSON fields are the POC contract. They are not a signed Jinchen API.
+ERPNext stock is maintained in an in-memory ledger. Messages are represented by JSON files. No live Jinchen or ERPNext API calls are made. The JSON fields represent the POC contract, not a signed Jinchen API specification.
 
-## Show it
+## 1. Clone
 
-```bash
-cd motaxle-jinchen-connector
-python3 server.py
-```
 
-Then open http://127.0.0.1:8765. The desk has Today, Work order, Material, Operations, Quality, Trace, and Message log. Material, Operations, and Quality also take a message you type. Switch A logs a stock message without posting it. Reset job returns the ledger to 500 kg. Stop the server with Ctrl+C.
+    git clone https://github.com/manjot1104/jinchen.git
+    cd jinchen/motaxle-jinchen-connector
 
-```bash
-python3 demo.py
-python3 -m unittest tests/test_poc.py
-```
+## 2. Discover
 
-A pass prints raw 380 after a repeated J-100, finished goods 0 after cutting, hold 96, and a lookup from batch B-1 back to heat H-441.
+Start the application:
+
+    python3 server.py
+
+Open http://127.0.0.1:8765. Use the Trace screen to look up batch B-1 and trace it back to heat H-441.
+
+## 3. Demo
+
+Run:
+
+    python3 demo.py
+
+The demo covers material issues, duplicate replay, returns, operation confirmations, quality dispositions, receipts, and batch traceability.
+
+Expected results include raw stock of 380 kg after the J-100 issue, no duplicate stock posting on replay, finished goods of 0, hold quantity of 96 kg, and batch B-1 linked to heat H-441.
+
+## 4. Prove
+
+Reserved for Ananya.
+
+## 5. Server
+
+Start the application:
+
+    python3 server.py
+
+Open http://127.0.0.1:8765.
+
+Available screens: Today, Work order, Material, Operations, Quality, Trace, Message log, and Inbox.
+
+Stop the server with Ctrl+C.
+
+## 6. Copy Samples and Read Inbox
+
+Open Inbox and select Copy samples. This copies sample JSON messages from inbox/samples/ into inbox/in/. The inbox must be empty before copying.
+
+Select Read inbox to process available messages. Processed messages move to inbox/done/, and results are written to inbox/results/.
+
+## 7. Switch A Behaviour
+
+When Switch A is ON, stock messages are queued and not posted. Confirmation messages can still be processed.
+
+Turning Switch A OFF does not automatically process queued messages. Select Read inbox again to process them.
+
+Switch A is a local POC control and does not call Jinchen.
+
+## 8. Configuration
+
+config.json uses test mode with an empty live_password. No production credentials or live integration are configured.
+
+## 9. Tests
+
+Run the complete test suite:
+
+    python3 -m unittest discover -s tests -v
+
+Tests cover connector workflows, duplicate replay after a simulated log failure, and Switch A inbox behaviour.
