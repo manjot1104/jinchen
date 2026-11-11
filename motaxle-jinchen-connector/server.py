@@ -14,7 +14,8 @@ from urllib.parse import unquote
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from connector.poc import Connector
+from connector.poc import ConfigError, Connector
+from connector.inbox import copy_samples, list_inbox, load_config, read_all
 
 HOST = "127.0.0.1"
 PORT = 8765
@@ -46,6 +47,31 @@ class Desk:
         if spec is None:
             return None
         return self.apply(action_id, spec["message"], spec.get("drop_log", False))
+
+    def read_inbox(self):
+        """Read inbox files through the desk's current Switch A setting."""
+        files = list_inbox()
+        results = read_all(self.connector, switch_a=self.switch_a)
+
+        last_result = None
+        for source, result in zip(files, results):
+            row = {
+                "id": source.name,
+                "status": result["status"],
+                "code": result["code"],
+                "document": result["document"],
+                "message": result["message"],
+            }
+            self.attempts.append(row)
+            last_result = row
+
+        payload = self.payload(last_result)
+        payload["inbox_message"] = (
+            f"Read {len(results)} inbox file(s)."
+            if results
+            else "Inbox is empty."
+        )
+        return payload
 
     def apply(self, label, message, drop_log=False):
         kind = (message or {}).get("kind") or ""
@@ -192,6 +218,7 @@ class Desk:
             "switch_b": self.switch_b,
             "released": self.released,
             "result": result,
+            "inbox_files": [item.name for item in list_inbox()],
         }
 
 
@@ -327,6 +354,7 @@ SCREENS = {
     "quality": "Quality",
     "trace": "Trace",
     "log": "Message log",
+    "inbox": "Inbox",
 }
 
 
@@ -488,11 +516,12 @@ PAGE = """<!DOCTYPE html>
       <input id="log-filter" placeholder="E-DUP, H-441, STE-0001">
     </section>
     <section id="view-log" class="hidden"></section>
+    <section id="view-inbox" class="hidden"></section>
   </main>
 </div>
 <script>
-const screens = ["today","order","material","operations","quality","trace","log"];
-const titles = {today:"Today", order:"Work order", material:"Material", operations:"Operations", quality:"Quality", trace:"Trace", log:"Message log"};
+const screens = ["today","order","material","operations","quality","trace","log","inbox"];
+const titles = {today:"Today", order:"Work order", material:"Material", operations:"Operations", quality:"Quality", trace:"Trace", log:"Message log", inbox:"Inbox"};
 const bins = [["raw","Raw store","kg"],["wip","Forging WIP","kg"],["hold","QC hold","pcs"],["finished","Finished","pcs"],["rejection","Rejection","pcs"],["rework","Rework","pcs"],["scrap","Scrap","pcs"]];
 let state = null;
 let view = "today";
@@ -627,6 +656,25 @@ function paint() {
       }).join("") + "</table>" : "") +
     "</section>";
 
+  const inboxFiles = state.inbox_files || [];
+  const inboxList = inboxFiles.map(function (name) {
+    const item = document.createElement("li");
+    item.textContent = name;
+    return item.outerHTML;
+  }).join("");
+
+  document.getElementById("view-inbox").innerHTML =
+    '<section class="panel"><h2>Files waiting in inbox/in</h2>' +
+    '<p><button class="go" type="button" data-copy-samples>Copy samples</button> '
+    + '<button class="send" type="button" data-read-inbox>Read inbox</button></p>' +
+    '<p class="muted" id="inbox-message"></p>' +
+    (inboxFiles.length
+      ? '<ul class="plain">' + inboxList + '</ul>'
+      : '<p class="muted">No waiting JSON files.</p>') +
+    '</section>';
+  // The message comes from the server as text. Set it as text, never as markup.
+  document.getElementById("inbox-message").textContent = state.inbox_message || "";
+
   document.querySelectorAll("#nav button").forEach(function (button) {
     button.className = button.getAttribute("data-tab") === view ? "on" : "";
   });
@@ -683,6 +731,32 @@ async function lookup(event) {
   if (box) box.innerHTML = answerHtml(lastLookup);
 }
 
+async function readInbox() {
+  const response = await fetch("/api/read-inbox", {method:"POST"});
+  const payload = await response.json();
+
+  if (!response.ok) {
+    window.alert(payload.error || "Could not read inbox.");
+    return;
+  }
+
+  state = payload;
+  paint();
+}
+
+async function copySamples() {
+  const response = await fetch("/api/copy-samples", {method:"POST"});
+  const payload = await response.json();
+
+  if (!response.ok) {
+    window.alert(payload.error || "Could not copy samples.");
+    return;
+  }
+
+  state = payload;
+  paint();
+}
+
 async function toggleSwitch(name) {
   const on = name === "A" ? !state.switch_a : !state.switch_b;
   state = await (await fetch("/api/switch", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({name: name, on: on})})).json();
@@ -702,6 +776,14 @@ document.body.addEventListener("click", function (event) {
   const sw = event.target.closest("[data-switch]");
   if (sw) { toggleSwitch(sw.getAttribute("data-switch")); return; }
   if (event.target.closest("[data-release]")) { releaseJob(); return; }
+  if (event.target.closest("[data-read-inbox]")) {
+    readInbox();
+    return;
+  }
+  if (event.target.closest("[data-copy-samples]")) {
+    copySamples();
+    return;
+  }
   const chip = event.target.closest("[data-batch]");
   if (chip) {
     const input = document.getElementById("batch");
@@ -813,6 +895,18 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = self.path.split("?", 1)[0]
+        if path == "/api/read-inbox":
+            with LOCK:
+                payload = DESK.read_inbox()
+            self.send_json(payload)
+            return
+        if path == "/api/copy-samples":
+            with LOCK:
+                result = copy_samples()
+                payload = DESK.payload()
+                payload["inbox_message"] = result["message"]
+            self.send_json(payload)
+            return
         if path == "/api/reset":
             with LOCK:
                 DESK.reset()
@@ -874,6 +968,12 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
+    try:
+        load_config()
+    except ConfigError as exc:
+        print(str(exc), flush=True)
+        print("The desk did not start.", flush=True)
+        return 1
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     print("Open http://%s:%d" % (HOST, PORT), flush=True)
     print("Ctrl+C stops it.", flush=True)
@@ -881,4 +981,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

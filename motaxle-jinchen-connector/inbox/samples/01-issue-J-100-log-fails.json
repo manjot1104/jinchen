@@ -1,0 +1,11 @@
+{
+  "kind": "issue",
+  "id": "J-100",
+  "work_order": "WO-2401",
+  "item": "ST-20",
+  "qty": 120,
+  "uom": "Kg",
+  "batch": "H-441",
+  "from_warehouse": "Raw Material Store",
+  "to_warehouse": "Forging WIP"
+}
