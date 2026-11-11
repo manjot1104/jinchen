@@ -667,13 +667,13 @@ function paint() {
     '<section class="panel"><h2>Files waiting in inbox/in</h2>' +
     '<p><button class="go" type="button" data-copy-samples>Copy samples</button> '
     + '<button class="send" type="button" data-read-inbox>Read inbox</button></p>' +
-    (state.inbox_message
-      ? '<p class="muted">' + state.inbox_message + '</p>'
-      : '') +
+    '<p class="muted" id="inbox-message"></p>' +
     (inboxFiles.length
       ? '<ul class="plain">' + inboxList + '</ul>'
       : '<p class="muted">No waiting JSON files.</p>') +
     '</section>';
+  // The message comes from the server as text. Set it as text, never as markup.
+  document.getElementById("inbox-message").textContent = state.inbox_message || "";
 
   document.querySelectorAll("#nav button").forEach(function (button) {
     button.className = button.getAttribute("data-tab") === view ? "on" : "";
