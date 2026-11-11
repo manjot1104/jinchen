@@ -98,9 +98,14 @@ class Ledger:
         self.entries.append(entry)
         return entry
 
-    def find(self, ref, work_order):
+    def find(self, ref, work_order, kind):
+        """The repeat key is the message id, the work order, and the kind.
+
+        A return may reuse an issue id. Hold, return, scrap, and receipt do
+        not share one another's keys.
+        """
         for entry in self.entries:
-            if entry.ref == ref and entry.work_order == work_order:
+            if entry.ref == ref and entry.work_order == work_order and entry.kind == kind:
                 return entry
         return None
 
@@ -134,7 +139,7 @@ class Connector:
         work_order = message.get("work_order") or ""
         if not ref or not work_order:
             return self._done("Business Rejected", "E-QTY", "", "Id and work order are required.", ref, work_order, kind or "", drop_log)
-        existing = self.ledger.find(ref, work_order)
+        existing = self.ledger.find(ref, work_order, kind)
         if existing and kind in ("issue", "return", "disposition", "receipt"):
             return self._done("Posted", "E-DUP", existing.name, "Already posted. No second stock entry.", ref, work_order, kind, drop_log)
         handler = {
