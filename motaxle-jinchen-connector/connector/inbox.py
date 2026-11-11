@@ -4,11 +4,37 @@ import json
 import shutil
 from pathlib import Path
 
+from connector.poc import ConfigError, require_test_mode
+
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 INBOX_DIR = PROJECT_ROOT / "inbox" / "in"
 DONE_DIR = PROJECT_ROOT / "inbox" / "done"
 RESULTS_DIR = PROJECT_ROOT / "inbox" / "results"
+CONFIG_PATH = PROJECT_ROOT / "config.json"
+
+
+def load_config(path=None):
+    """Read config.json and refuse to continue unless test mode is clean.
+
+    Returns {"mode": ..., "live_password": ...}. Raises ConfigError with the
+    sentences already in connector.poc when the mode is wrong or a live
+    password is set in test mode. The password is never printed.
+    """
+    config_path = Path(path) if path is not None else CONFIG_PATH
+    try:
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise ConfigError("config.json was not found at %s." % config_path)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        raise ConfigError("config.json is not a valid JSON object.")
+    if not isinstance(data, dict):
+        raise ConfigError("config.json is not a valid JSON object.")
+
+    mode = data.get("mode")
+    live_password = data.get("live_password") or ""
+    require_test_mode(mode, live_password)
+    return {"mode": mode, "live_password": live_password}
 
 STOCK_KINDS = {"issue", "return", "disposition", "receipt"}
 
@@ -115,8 +141,14 @@ def read_all(
     inbox_dir=None,
     done_dir=None,
     results_dir=None,
+    config_path=None,
 ):
-    """Read the current inbox in filename order, respecting Switch A."""
+    """Read the current inbox in filename order, respecting Switch A.
+
+    The config is checked before the first file is touched. A filled live
+    password or a bad mode raises ConfigError and nothing moves.
+    """
+    load_config(config_path)
     files = list_inbox(inbox_dir)
     results = []
 

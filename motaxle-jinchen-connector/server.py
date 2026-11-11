@@ -14,8 +14,8 @@ from urllib.parse import unquote
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from connector.poc import Connector
-from connector.inbox import copy_samples, list_inbox, read_all
+from connector.poc import ConfigError, Connector
+from connector.inbox import copy_samples, list_inbox, load_config, read_all
 
 HOST = "127.0.0.1"
 PORT = 8765
@@ -968,6 +968,12 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
+    try:
+        load_config()
+    except ConfigError as exc:
+        print(str(exc), flush=True)
+        print("The desk did not start.", flush=True)
+        return 1
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     print("Open http://%s:%d" % (HOST, PORT), flush=True)
     print("Ctrl+C stops it.", flush=True)
@@ -975,4 +981,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
