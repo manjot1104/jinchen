@@ -1,0 +1,32 @@
+0:00 This program is not Jinchen and it is not the Motaxle app. The file is a stand-in because the API pack is not signed.
+Screen: Today
+
+0:40 Five hundred kilograms opened in ERPNext. Jinchen did not receive them.
+Screen: Today
+
+1:20 One issue. Raw store 380. WIP 120. One stock entry, heat H-441.
+Screen: Material
+
+2:20 Sent twice. The raw store is still 380. That is the proof.
+Screen: Material
+
+3:10 Four kilograms came back. Raw 384. WIP 116. The same return does not make 8 kilograms.
+Screen: Material
+
+4:00 Cutting is confirmed. Finished goods is still zero. Confirmation is not a receipt.
+Screen: Operations
+
+4:50 Two rejected, one rework, one scrap. Finished goods is still zero. No CAPA was opened.
+Screen: Quality
+
+5:50 Forty plus fifty-six is ninety-six. They sit in Final QC Hold. Finished goods is still zero.
+Screen: Quality
+
+6:40 The hold is still 96, not 136. Rejected pieces cannot enter finished goods.
+Screen: Quality
+
+7:20 Batch B-1 reads back to H-441 and WO-2401. H441 does not match.
+Screen: Trace
+
+8:00 The ERPNext POC proved the business flow. This one proved the connector will not double the metal. The real Jinchen call waits for the API document.
+Screen: Today
