@@ -114,5 +114,61 @@ class RepeatKeyByKind(unittest.TestCase):
         self.assertEqual(c.pieces()["hold"], 40)
 
 
+class BadInputIsARefusalNotACrash(unittest.TestCase):
+    def assert_refused_untouched(self, message, code, sentence):
+        c = Connector()
+        result = c.process(message)  # must not raise
+        self.assertEqual(result.status, "Business Rejected")
+        self.assertEqual(result.code, code)
+        self.assertEqual(result.message, sentence)
+        self.assertEqual(c.kg(), {"raw": 500, "wip": 0})
+        self.assertEqual(c.pieces()["finished"], 0)
+        self.assertEqual(len(c.ledger.entries), 0)
+        return c
+
+    def test_qty_abc_is_e_qty(self):
+        self.assert_refused_untouched(issue("J-TXT", qty="abc"), "E-QTY", "Quantity is not a number.")
+
+    def test_qty_true_is_e_qty(self):
+        self.assert_refused_untouched(issue("J-TRUE", qty=True), "E-QTY", "Quantity is not a number.")
+
+    def test_operation_ten_is_e_op(self):
+        self.assert_refused_untouched(
+            {"kind": "confirm", "id": "CF-TXT", "work_order": "WO-2401", "operation": "ten", "completed": 1},
+            "E-OP", "Operation is not on the demo route.")
+
+    def test_rejected_x_is_e_qty(self):
+        self.assert_refused_untouched(
+            {"kind": "confirm", "id": "CF-X", "work_order": "WO-2401", "operation": 10,
+             "completed": 1, "rejected": "x", "rework": 0, "scrap": 0},
+            "E-QTY", "Quantity is not a number.")
+
+    def test_a_list_is_e_item(self):
+        c = self.assert_refused_untouched(["not", "a", "dict"], "E-ITEM", "Unknown message.")
+        self.assertEqual(c.log, [])
+
+    def test_none_and_a_string_are_e_item(self):
+        self.assert_refused_untouched(None, "E-ITEM", "Unknown message.")
+        self.assert_refused_untouched("issue", "E-ITEM", "Unknown message.")
+
+    def test_a_numeric_string_still_posts(self):
+        c = Connector()
+        result = c.process(issue("J-STR", qty="120"))
+        self.assertEqual(result.status, "Posted")
+        self.assertEqual(c.kg()["raw"], 380)
+
+    def test_the_callers_dictionary_is_not_changed(self):
+        c = Connector()
+        message = issue("J-STR", qty="120")
+        c.process(message)
+        self.assertEqual(message["qty"], "120")
+        self.assertIsInstance(message["qty"], str)
+
+    def test_a_fractional_operation_is_e_op(self):
+        self.assert_refused_untouched(
+            {"kind": "confirm", "id": "CF-HALF", "work_order": "WO-2401", "operation": 10.5, "completed": 1},
+            "E-OP", "Operation is not on the demo route.")
+
+
 if __name__ == "__main__":
     unittest.main()

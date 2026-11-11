@@ -108,17 +108,28 @@ def read_next(
         }
         move_to_done = False
     else:
-        result = connector.process(
-            message,
-            drop_log="log-fails" in source.name,
-        )
+        try:
+            result = connector.process(
+                message,
+                drop_log="log-fails" in source.name,
+            )
+        except Exception:  # the last guard: the next file must still be read
+            result = None
 
-        result_data = {
-            "status": result.status,
-            "code": result.code,
-            "document": result.document,
-            "message": result.message,
-        }
+        if result is None:
+            result_data = {
+                "status": "Business Rejected",
+                "code": "E-ITEM",
+                "document": "",
+                "message": "File could not be processed.",
+            }
+        else:
+            result_data = {
+                "status": result.status,
+                "code": result.code,
+                "document": result.document,
+                "message": result.message,
+            }
 
     done_directory.mkdir(parents=True, exist_ok=True)
     results_directory.mkdir(parents=True, exist_ok=True)
