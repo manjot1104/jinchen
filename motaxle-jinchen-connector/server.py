@@ -85,6 +85,9 @@ class Desk:
             }
             self.attempts.append(row)
             return row
+        # Work on a copy. For a catalog button, message is ACTIONS[...]["message"],
+        # a module-level dictionary shared by every click and every browser tab.
+        message = dict(message)
         if "qty" in message and message["qty"] != "":
             try:
                 message["qty"] = float(message["qty"])
@@ -697,12 +700,23 @@ function show(name) {
   paint();
 }
 
+const unitFor = {issue: "Kg", return: "Kg", receipt: "Nos"};
+const itemFor = {issue: "ST-20", return: "ST-20", receipt: "CR-100", disposition: "CR-100"};
+let lastComposerKind = "";
+
 function syncComposer() {
   const kind = document.getElementById("m-kind").value;
   document.querySelectorAll("#composer [data-for]").forEach(function (el) {
     const ok = el.getAttribute("data-for").split(" ").indexOf(kind) >= 0;
     el.className = ok ? "" : "hidden";
   });
+  // The unit and item follow the kind: a receipt is in Nos, steel is in Kg.
+  // The user may still type over them, so a wrong unit stays sendable.
+  if (kind !== lastComposerKind) {
+    if (unitFor[kind]) document.getElementById("m-uom").value = unitFor[kind];
+    if (itemFor[kind]) document.getElementById("m-item").value = itemFor[kind];
+    lastComposerKind = kind;
+  }
 }
 
 async function load() {
