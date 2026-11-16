@@ -120,6 +120,7 @@ def main():
         equal(pieces["scrap"], 1.0, "scrap")
         equal(pieces["finished"], 0.0, "finished goods")
         equal(c.ledger.capa, 0, "CAPA count")
+        equal(c.ledger.capa_rows, [], "CAPA rows")
         equal(c.kg(), {"raw": 384.0, "wip": 116.0}, "raw/WIP stock")
         equal(len(c.ledger.entries), 5, "entries after dispositions")
 

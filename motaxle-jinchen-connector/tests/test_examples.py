@@ -26,6 +26,12 @@ class ExampleFileTests(unittest.TestCase):
         files = {path.name for path in EXAMPLES.glob("*.json")}
         self.assertEqual(files, EXPECTED_REFUSAL_FILES)
 
+        for filename in EXPECTED_REFUSAL_FILES:
+            data = self.load(filename)
+            self.assertIsInstance(data, dict)
+            for field in ("kind", "id", "work_order"):
+                self.assertIn(field, data)
+
     def test_st20_disk_example_is_rejected(self):
         connector = Connector()
         before = connector.kg().copy()
