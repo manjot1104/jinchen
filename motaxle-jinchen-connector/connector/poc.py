@@ -72,6 +72,7 @@ class Entry:
     batch: str
     source: str
     target: str
+    against: str = ""
 
 
 @dataclass
@@ -96,8 +97,15 @@ class Result:
 class Ledger:
     bins: dict = field(default_factory=dict)
     entries: list = field(default_factory=list)
-    capa: int = 0
+    capa_rows: list = field(default_factory=list)
     _n: int = 0
+
+    def open_capa(self, ref, work_order, reason):
+        self.capa_rows.append((ref, work_order, reason))
+
+    @property
+    def capa(self):
+        return len(self.capa_rows)
 
     def qty(self, warehouse, item, batch=""):
         return self.bins.get((warehouse, item, batch), 0.0)
@@ -106,10 +114,11 @@ class Ledger:
         key = (warehouse, item, batch)
         self.bins[key] = self.bins.get(key, 0.0) + qty
 
-    def submit(self, kind, ref, work_order, item, qty, uom, batch, source, target):
+    def submit(self, kind, ref, work_order, item, qty, uom, batch, source, target, against=""):
         self._n += 1
         entry = Entry(
-            "STE-%04d" % self._n, kind, ref, work_order, item, qty, uom, batch, source, target
+            "STE-%04d" % self._n, kind, ref, work_order, item, qty, uom, batch, source, target,
+            against=against,
         )
         if source:
             self.add(source, item, batch, -qty)
@@ -217,11 +226,11 @@ class Connector:
         issued = 0.0
         returned = 0.0
         for entry in self.ledger.entries:
-            if entry.work_order != work_order or entry.item != "ST-20":
+            if entry.work_order != work_order:
                 continue
             if entry.kind == "issue" and entry.ref == issue_id:
                 issued += entry.qty
-            if entry.kind == "return" and entry.batch == "H-441":
+            if entry.kind == "return" and entry.against == issue_id:
                 returned += entry.qty
         return issued, issued - returned
 
@@ -234,14 +243,23 @@ class Connector:
         qty = float(message.get("qty") or 0)
         if message.get("as_scrap"):
             return self._done("Business Rejected", "E-REASON", "", "Scrap is not a return.", ref, work_order, "return", drop_log)
+        uom = message.get("uom") or ""
+        if uom and uom != "Kg":
+            return self._done("Business Rejected", "E-UOM", "", "Return unit must be Kg.", ref, work_order, "return", drop_log)
         issued, remaining = self._issued_remaining(issue_id, work_order)
-        if issued <= 0:
+        issue_entry = next(
+            (entry for entry in self.ledger.entries
+             if entry.kind == "issue" and entry.ref == issue_id
+             and entry.work_order == work_order),
+            None,
+        )
+        if issued <= 0 or issue_entry is None:
             return self._done("Business Rejected", "E-ITEM", "", "Original issue was not posted.", ref, work_order, "return", drop_log)
-        if item != "ST-20" or batch != "H-441":
+        if item != issue_entry.item or batch != issue_entry.batch:
             return self._done("Business Rejected", "E-BATCH", "", "Return must be ST-20 heat H-441.", ref, work_order, "return", drop_log)
         if qty <= 0 or qty > remaining:
             return self._done("Business Rejected", "E-QTY", "", "Return is above the quantity still out.", ref, work_order, "return", drop_log)
-        entry = self.ledger.submit("return", ref, work_order, "ST-20", qty, "Kg", "H-441", WIP, RAW)
+        entry = self.ledger.submit("return", ref, work_order, issue_entry.item, qty, "Kg", issue_entry.batch, WIP, RAW, against=issue_id)
         return self._done("Posted", "", entry.name, "Returned once.", ref, work_order, "return", drop_log)
 
     def _confirm(self, message, drop_log):
@@ -263,9 +281,12 @@ class Connector:
     def _disposition(self, message, drop_log):
         ref = message["id"]
         work_order = message["work_order"]
+        item = message.get("item") or ""
         reason = message.get("reason") or ""
         decision = message.get("decision") or ""
         qty = float(message.get("qty") or 0)
+        if item != "CR-100":
+            return self._done("Business Rejected", "E-ITEM", "", "Disposition item is not CR-100.", ref, work_order, "disposition", drop_log)
         if reason not in REASONS or REASONS[reason] != decision:
             return self._done("Business Rejected", "E-REASON", "", "Reason is blank or does not match the decision.", ref, work_order, "disposition", drop_log)
         if qty <= 0:
@@ -283,6 +304,9 @@ class Connector:
         asked = message.get("to_warehouse") or HOLD
         if item != "CR-100":
             return self._done("Business Rejected", "E-ITEM", "", "Receipt item is not CR-100.", ref, work_order, "receipt", drop_log)
+        uom = message.get("uom") or ""
+        if uom and uom != "Nos":
+            return self._done("Business Rejected", "E-UOM", "", "Receipt unit must be Nos.", ref, work_order, "receipt", drop_log)
         if qty <= 0:
             return self._done("Business Rejected", "E-QTY", "", "Quantity must be greater than zero.", ref, work_order, "receipt", drop_log)
         if asked == FG:
@@ -298,10 +322,14 @@ class Connector:
         if batch not in self.output_batches:
             return {"batch": batch, "result": "missing"}
         work_order, document = self.output_batches[batch]
-        issued = any(e.kind == "issue" and e.work_order == work_order and e.batch == "H-441" for e in self.ledger.entries)
-        if not issued:
+        issue_entry = next(
+            (entry for entry in self.ledger.entries
+             if entry.kind == "issue" and entry.work_order == work_order),
+            None,
+        )
+        if issue_entry is None:
             return {"batch": batch, "result": "missing"}
-        return {"batch": batch, "result": "found", "work_order": work_order, "heat": "H-441", "document": document}
+        return {"batch": batch, "result": "found", "work_order": work_order, "heat": issue_entry.batch, "document": document}
 
     def kg(self):
         return {

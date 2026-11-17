@@ -120,10 +120,20 @@ def main():
         equal(pieces["scrap"], 1.0, "scrap")
         equal(pieces["finished"], 0.0, "finished goods")
         equal(c.ledger.capa, 0, "CAPA count")
+        equal(c.ledger.capa_rows, [], "CAPA rows")
         equal(c.kg(), {"raw": 384.0, "wip": 116.0}, "raw/WIP stock")
         equal(len(c.ledger.entries), 5, "entries after dispositions")
 
-    check("07", "rejection, rework and scrap are separated without finished goods", tc07)
+        control = Connector()
+        control.ledger.open_capa("D-CONTROL", "WO-2401", "manual-check")
+        equal(control.ledger.capa, 1, "manual CAPA count")
+        equal(
+            control.ledger.capa_rows,
+            [("D-CONTROL", "WO-2401", "manual-check")],
+            "manual CAPA rows",
+        )
+
+    check("07", "dispositions keep CAPA rows empty; explicit CAPA control adds one row", tc07)
 
     def tc08():
         result = c.process({
