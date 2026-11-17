@@ -185,7 +185,7 @@ class Connector:
         issued = 0.0
         returned = 0.0
         for entry in self.ledger.entries:
-            if entry.work_order != work_order or entry.item != "ST-20":
+            if entry.work_order != work_order:
                 continue
             if entry.kind == "issue" and entry.ref == issue_id:
                 issued += entry.qty
@@ -202,20 +202,20 @@ class Connector:
         qty = float(message.get("qty") or 0)
         if message.get("as_scrap"):
             return self._done("Business Rejected", "E-REASON", "", "Scrap is not a return.", ref, work_order, "return", drop_log)
+        uom = message.get("uom") or ""
+        if uom and uom != "Kg":
+            return self._done("Business Rejected", "E-UOM", "", "Return unit must be Kg.", ref, work_order, "return", drop_log)
         issued, remaining = self._issued_remaining(issue_id, work_order)
         issue_entry = next(
             (entry for entry in self.ledger.entries
              if entry.kind == "issue" and entry.ref == issue_id
-             and entry.work_order == work_order and entry.item == "ST-20"),
+             and entry.work_order == work_order),
             None,
         )
         if issued <= 0 or issue_entry is None:
             return self._done("Business Rejected", "E-ITEM", "", "Original issue was not posted.", ref, work_order, "return", drop_log)
         if item != issue_entry.item or batch != issue_entry.batch:
             return self._done("Business Rejected", "E-BATCH", "", "Return must be ST-20 heat H-441.", ref, work_order, "return", drop_log)
-        uom = message.get("uom") or ""
-        if uom and uom != "Kg":
-            return self._done("Business Rejected", "E-UOM", "", "Return unit must be Kg.", ref, work_order, "return", drop_log)
         if qty <= 0 or qty > remaining:
             return self._done("Business Rejected", "E-QTY", "", "Return is above the quantity still out.", ref, work_order, "return", drop_log)
         entry = self.ledger.submit("return", ref, work_order, issue_entry.item, qty, "Kg", issue_entry.batch, WIP, RAW, against=issue_id)
