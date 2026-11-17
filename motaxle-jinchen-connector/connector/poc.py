@@ -33,6 +33,26 @@ class ConfigError(Exception):
     pass
 
 
+NUMBER_FIELDS = ("qty", "completed", "rejected", "rework", "scrap")
+
+
+def _number(value):
+    """A float for an int, a float, or a numeric string. None for anything else.
+
+    True and False are not numbers here. A blank string is not a number.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
 def require_test_mode(mode, live_password):
     if mode == "test" and live_password:
         raise ConfigError("Test mode refuses to start when a live password is set.")
@@ -98,9 +118,14 @@ class Ledger:
         self.entries.append(entry)
         return entry
 
-    def find(self, ref, work_order):
+    def find(self, ref, work_order, kind):
+        """The repeat key is the message id, the work order, and the kind.
+
+        A return may reuse an issue id. Hold, return, scrap, and receipt do
+        not share one another's keys.
+        """
         for entry in self.entries:
-            if entry.ref == ref and entry.work_order == work_order:
+            if entry.ref == ref and entry.work_order == work_order and entry.kind == kind:
                 return entry
         return None
 
@@ -129,12 +154,15 @@ class Connector:
         return Result(status, code, document, message)
 
     def process(self, message, drop_log=False):
+        if not isinstance(message, dict):
+            # No id to log against. A list, None, or a string is not a message.
+            return Result("Business Rejected", "E-ITEM", "", "Unknown message.")
         kind = message.get("kind")
         ref = message.get("id") or ""
         work_order = message.get("work_order") or ""
         if not ref or not work_order:
             return self._done("Business Rejected", "E-QTY", "", "Id and work order are required.", ref, work_order, kind or "", drop_log)
-        existing = self.ledger.find(ref, work_order)
+        existing = self.ledger.find(ref, work_order, kind)
         if existing and kind in ("issue", "return", "disposition", "receipt"):
             return self._done("Posted", "E-DUP", existing.name, "Already posted. No second stock entry.", ref, work_order, kind, drop_log)
         handler = {
@@ -146,6 +174,19 @@ class Connector:
         }.get(kind)
         if handler is None:
             return self._done("Business Rejected", "E-ITEM", "", "Unknown message.", ref, work_order, kind or "", drop_log)
+        # Work on a copy. The caller's dictionary is never changed.
+        message = dict(message)
+        for key in NUMBER_FIELDS:
+            if key in message and message[key] is not None:
+                number = _number(message[key])
+                if number is None:
+                    return self._done("Business Rejected", "E-QTY", "", "Quantity is not a number.", ref, work_order, kind, drop_log)
+                message[key] = number
+        if "operation" in message and message["operation"] is not None:
+            operation = _number(message["operation"])
+            if operation is None or operation != int(operation):
+                return self._done("Business Rejected", "E-OP", "", "Operation is not on the demo route.", ref, work_order, kind, drop_log)
+            message["operation"] = int(operation)
         return handler(message, drop_log)
 
     def _issue(self, message, drop_log):
