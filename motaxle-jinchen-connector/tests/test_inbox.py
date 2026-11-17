@@ -210,6 +210,49 @@ class InboxTests(unittest.TestCase):
         self.assertEqual((SAMPLES / ISSUE_FILE).read_text(), before)
         self.assertEqual(len(list(SAMPLES.glob("*.json"))), 9)
 
+    def test_read_all_continues_past_a_bad_value_file(self):
+        with tempfile.TemporaryDirectory() as temp:
+            inbox, done, results = temp_inbox(Path(temp))
+            shutil.copy2(SAMPLES / ISSUE_FILE, inbox / ISSUE_FILE)
+            (inbox / "02-bad-qty.json").write_text(
+                '{"kind": "issue", "id": "J-TXT", "work_order": "WO-2401", "qty": "abc"}')
+            shutil.copy2(SAMPLES / "03-confirm-op10.json", inbox / "03-confirm-op10.json")
+            connector = Connector()
+
+            outcomes = read_all(connector, inbox_dir=inbox, done_dir=done, results_dir=results)
+
+            self.assertEqual(len(outcomes), 3)
+            self.assertEqual(outcomes[0]["status"], "Posted")
+            self.assertEqual(outcomes[1]["code"], "E-QTY")
+            self.assertEqual(outcomes[2]["status"], "Posted")
+            self.assertEqual(connector.kg()["raw"], 380)
+            self.assertEqual(len(connector.confirmations), 1)
+            self.assertEqual(sorted(p.name for p in done.iterdir()),
+                             [ISSUE_FILE, "02-bad-qty.json", "03-confirm-op10.json"])
+            self.assertEqual(len(list(inbox.glob("*.json"))), 0)
+
+    def test_read_all_survives_a_process_that_raises(self):
+        with tempfile.TemporaryDirectory() as temp:
+            inbox, done, results = temp_inbox(Path(temp))
+            (inbox / "01-boom.json").write_text('{"kind": "issue", "id": "J-BOOM", "work_order": "WO-2401"}')
+            shutil.copy2(SAMPLES / "03-confirm-op10.json", inbox / "03-confirm-op10.json")
+            connector = Connector()
+            real = connector.process
+
+            def explode_once(message, drop_log=False):
+                if message.get("id") == "J-BOOM":
+                    raise RuntimeError("unexpected")
+                return real(message, drop_log=drop_log)
+
+            with mock.patch.object(connector, "process", side_effect=explode_once):
+                outcomes = read_all(connector, inbox_dir=inbox, done_dir=done, results_dir=results)
+
+            self.assertEqual(outcomes[0]["code"], "E-ITEM")
+            self.assertEqual(outcomes[0]["message"], "File could not be processed.")
+            self.assertEqual(outcomes[1]["status"], "Posted")
+            self.assertTrue((done / "01-boom.json").exists())
+            self.assertEqual(json.loads((results / "01-boom.json").read_text())["code"], "E-ITEM")
+
 
 if __name__ == "__main__":
     unittest.main()

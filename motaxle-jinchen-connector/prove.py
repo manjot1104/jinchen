@@ -157,8 +157,8 @@ def main():
         equal(c.pieces()["hold"], 96.0, "quality hold")
         equal(c.pieces()["finished"], 0.0, "finished goods")
         equal(len(c.ledger.entries), 7, "entries after receipts")
-        equal(c.ledger.find("C-1", "WO-2401").name, "STE-0006", "C-1 document")
-        equal(c.ledger.find("C-2", "WO-2401").name, "STE-0007", "C-2 document")
+        equal(c.ledger.find("C-1", "WO-2401", "receipt").name, "STE-0006", "C-1 document")
+        equal(c.ledger.find("C-2", "WO-2401", "receipt").name, "STE-0007", "C-2 document")
 
     check("09", "C-1 and C-2 total 96 pieces in Quality Hold", tc09)
 

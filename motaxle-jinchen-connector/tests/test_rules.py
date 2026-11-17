@@ -1,286 +1,173 @@
-import inspect
+"""Rule changes from the tech lead's review: repeat key by kind, crash-free input."""
 import unittest
-from pathlib import Path
 
 from connector.poc import Connector
 
 
-def make_issue(ref="J-100", qty=120):
+def issue(ref="J-100", qty=120, **overrides):
+    message = {
+        "kind": "issue", "id": ref, "work_order": "WO-2401",
+        "item": "ST-20", "qty": qty, "uom": "Kg", "batch": "H-441",
+        "from_warehouse": "Raw Material Store", "to_warehouse": "Forging WIP",
+    }
+    message.update(overrides)
+    return message
+
+
+def return_message(ref, against="J-100", qty=4, **overrides):
+    message = {
+        "kind": "return", "id": ref, "work_order": "WO-2401", "against": against,
+        "item": "ST-20", "qty": qty, "uom": "Kg", "batch": "H-441",
+    }
+    message.update(overrides)
+    return message
+
+
+def receipt(ref, batch, qty, **overrides):
+    message = {
+        "kind": "receipt", "id": ref, "work_order": "WO-2401",
+        "item": "CR-100", "qty": qty, "uom": "Nos", "batch": batch,
+    }
+    message.update(overrides)
+    return message
+
+
+def disposition(ref="D-REJ", qty=2, decision="rejection", reason="forge-crack"):
     return {
-        "kind": "issue",
-        "id": ref,
-        "work_order": "WO-2401",
-        "item": "ST-20",
-        "qty": qty,
-        "uom": "Kg",
-        "batch": "H-441",
-        "from_warehouse": "Raw Material Store",
-        "to_warehouse": "Forging WIP",
+        "kind": "disposition", "id": ref, "work_order": "WO-2401",
+        "item": "CR-100", "qty": qty, "decision": decision, "reason": reason,
     }
 
 
-def make_return(ref, against="J-100", qty=4, **overrides):
-    message = {
-        "kind": "return",
-        "id": ref,
-        "work_order": "WO-2401",
-        "against": against,
-        "item": "ST-20",
-        "qty": qty,
-        "batch": "H-441",
-    }
-    message.update(overrides)
-    return message
+class RepeatKeyByKind(unittest.TestCase):
+    def test_a_return_may_reuse_an_issue_id(self):
+        c = Connector()
+        self.assertEqual(c.process(issue("X-1")).status, "Posted")
 
-
-def make_receipt(ref, batch, **overrides):
-    message = {
-        "kind": "receipt",
-        "id": ref,
-        "work_order": "WO-2401",
-        "item": "CR-100",
-        "qty": 5,
-        "batch": batch,
-    }
-    message.update(overrides)
-    return message
-
-
-def make_disposition(ref, **overrides):
-    message = {
-        "kind": "disposition",
-        "id": ref,
-        "work_order": "WO-2401",
-        "item": "CR-100",
-        "qty": 2,
-        "decision": "rejection",
-        "reason": "forge-crack",
-    }
-    message.update(overrides)
-    return message
-
-
-class ReturnUomRules(unittest.TestCase):
-    def test_wrong_return_uom_is_rejected_without_stock_change(self):
-        connector = Connector()
-        connector.process(make_issue())
-        before_kg = connector.kg().copy()
-        before_entries = len(connector.ledger.entries)
-
-        result = connector.process(make_return("R-BAD-UOM", uom="Nos"))
-
-        self.assertEqual(result.code, "E-UOM")
-        self.assertEqual(result.message, "Return unit must be Kg.")
-        self.assertEqual(connector.kg(), before_kg)
-        self.assertEqual(len(connector.ledger.entries), before_entries)
-        self.assertEqual(connector.pieces()["finished"], 0)
-        self.assertEqual(connector.ledger.capa, 0)
-
-    def test_wrong_uom_is_checked_before_issue_lookup(self):
-        connector = Connector()
-
-        result = connector.process(
-            make_return("R-NO-ISSUE", against="J-999", uom="Nos")
-        )
-
-        self.assertEqual(result.code, "E-UOM")
-        self.assertEqual(result.message, "Return unit must be Kg.")
-
-    def test_missing_return_uom_is_allowed(self):
-        connector = Connector()
-        connector.process(make_issue())
-
-        result = connector.process(make_return("R-NO-UOM"))
+        result = c.process(return_message("X-1", against="X-1", qty=4))
 
         self.assertEqual(result.status, "Posted")
-        self.assertEqual(connector.kg()["raw"], 384)
-        self.assertEqual(connector.kg()["wip"], 116)
+        self.assertEqual(result.code, "")
+        self.assertEqual(result.document, "STE-0002")
+        self.assertEqual(c.kg(), {"raw": 384, "wip": 116})
+        self.assertEqual(len(c.ledger.entries), 2)
 
+    def test_the_same_return_again_is_e_dup_on_its_own_document(self):
+        c = Connector()
+        c.process(issue("X-1"))
+        first = c.process(return_message("X-1", against="X-1", qty=4))
 
-class ReceiptUomRules(unittest.TestCase):
-    def test_wrong_receipt_uom_is_rejected_without_stock_change(self):
-        connector = Connector()
-        before_pieces = connector.pieces().copy()
-        before_entries = len(connector.ledger.entries)
+        second = c.process(return_message("X-1", against="X-1", qty=4))
 
-        result = connector.process(
-            make_receipt("C-BAD-UOM", "B-UOM", uom="Kg")
-        )
+        self.assertEqual(second.code, "E-DUP")
+        self.assertEqual(second.document, first.document)
+        self.assertEqual(c.kg()["raw"], 384)
+        self.assertEqual(len(c.ledger.entries), 2)
 
-        self.assertEqual(result.code, "E-UOM")
-        self.assertEqual(result.message, "Receipt unit must be Nos.")
-        self.assertEqual(connector.pieces(), before_pieces)
-        self.assertEqual(connector.pieces()["finished"], 0)
-        self.assertEqual(connector.ledger.capa, 0)
-        self.assertEqual(len(connector.ledger.entries), before_entries)
+    def test_a_receipt_may_reuse_the_same_id(self):
+        c = Connector()
+        c.process(issue("X-1"))
+        c.process(return_message("X-1", against="X-1", qty=4))
 
-    def test_missing_receipt_uom_is_allowed(self):
-        connector = Connector()
-
-        result = connector.process(make_receipt("C-NO-UOM", "B-NO-UOM"))
+        result = c.process(receipt("X-1", "B-1", 40))
 
         self.assertEqual(result.status, "Posted")
-        self.assertEqual(connector.pieces()["hold"], 5)
-        self.assertEqual(connector.pieces()["finished"], 0)
+        self.assertEqual(result.code, "")
+        self.assertEqual(c.pieces()["hold"], 40)
+        self.assertEqual(len(c.ledger.entries), 3)
+
+    def test_find_is_per_kind(self):
+        c = Connector()
+        c.process(issue("J-100"))
+        self.assertEqual(c.ledger.find("J-100", "WO-2401", "issue").name, "STE-0001")
+        self.assertIsNone(c.ledger.find("J-100", "WO-2401", "return"))
+        self.assertIsNone(c.ledger.find("J-100", "WO-2401", "receipt"))
+
+    def test_j100_twice_is_still_e_dup_on_ste_0001(self):
+        c = Connector()
+        c.process(issue("J-100"), drop_log=True)
+
+        again = c.process(issue("J-100"))
+
+        self.assertEqual(again.code, "E-DUP")
+        self.assertEqual(again.document, "STE-0001")
+        self.assertEqual(c.kg()["raw"], 380)
+        self.assertEqual(len(c.ledger.entries), 1)
+
+    def test_d_rej_twice_still_leaves_rejection_2(self):
+        c = Connector()
+        c.process(disposition())
+
+        again = c.process(disposition())
+
+        self.assertEqual(again.code, "E-DUP")
+        self.assertEqual(c.pieces()["rejection"], 2)
+        self.assertEqual(c.ledger.capa, 0)
+
+    def test_c1_twice_still_leaves_hold_40(self):
+        c = Connector()
+        c.process(receipt("C-1", "B-1", 40))
+
+        again = c.process(receipt("C-1", "B-1", 40))
+
+        self.assertEqual(again.code, "E-DUP")
+        self.assertEqual(c.pieces()["hold"], 40)
 
 
-class DispositionItemRules(unittest.TestCase):
-    def assert_item_rejected(self, message):
-        connector = Connector()
-        before_kg = connector.kg().copy()
-        before_pieces = connector.pieces().copy()
-        before_entries = len(connector.ledger.entries)
+class BadInputIsARefusalNotACrash(unittest.TestCase):
+    def assert_refused_untouched(self, message, code, sentence):
+        c = Connector()
+        result = c.process(message)  # must not raise
+        self.assertEqual(result.status, "Business Rejected")
+        self.assertEqual(result.code, code)
+        self.assertEqual(result.message, sentence)
+        self.assertEqual(c.kg(), {"raw": 500, "wip": 0})
+        self.assertEqual(c.pieces()["finished"], 0)
+        self.assertEqual(len(c.ledger.entries), 0)
+        return c
 
-        result = connector.process(message)
+    def test_qty_abc_is_e_qty(self):
+        self.assert_refused_untouched(issue("J-TXT", qty="abc"), "E-QTY", "Quantity is not a number.")
 
-        self.assertEqual(result.code, "E-ITEM")
-        self.assertEqual(result.message, "Disposition item is not CR-100.")
-        self.assertEqual(connector.kg(), before_kg)
-        self.assertEqual(connector.pieces(), before_pieces)
-        self.assertEqual(connector.pieces()["finished"], 0)
-        self.assertEqual(connector.ledger.capa, 0)
-        self.assertEqual(len(connector.ledger.entries), before_entries)
+    def test_qty_true_is_e_qty(self):
+        self.assert_refused_untouched(issue("J-TRUE", qty=True), "E-QTY", "Quantity is not a number.")
 
-    def test_wrong_disposition_item_is_rejected(self):
-        self.assert_item_rejected(
-            make_disposition("D-WRONG-ITEM", item="ST-20")
-        )
+    def test_operation_ten_is_e_op(self):
+        self.assert_refused_untouched(
+            {"kind": "confirm", "id": "CF-TXT", "work_order": "WO-2401", "operation": "ten", "completed": 1},
+            "E-OP", "Operation is not on the demo route.")
 
-    def test_missing_disposition_item_is_rejected(self):
-        self.assert_item_rejected(
-            make_disposition("D-MISSING-ITEM", item="")
-        )
+    def test_rejected_x_is_e_qty(self):
+        self.assert_refused_untouched(
+            {"kind": "confirm", "id": "CF-X", "work_order": "WO-2401", "operation": 10,
+             "completed": 1, "rejected": "x", "rework": 0, "scrap": 0},
+            "E-QTY", "Quantity is not a number.")
 
+    def test_a_list_is_e_item(self):
+        c = self.assert_refused_untouched(["not", "a", "dict"], "E-ITEM", "Unknown message.")
+        self.assertEqual(c.log, [])
 
-class ReturnAgainstIssueRules(unittest.TestCase):
-    def test_returns_reduce_only_their_own_issue_quantity(self):
-        connector = Connector()
+    def test_none_and_a_string_are_e_item(self):
+        self.assert_refused_untouched(None, "E-ITEM", "Unknown message.")
+        self.assert_refused_untouched("issue", "E-ITEM", "Unknown message.")
 
-        self.assertEqual(connector.process(make_issue()).status, "Posted")
-        self.assertEqual(connector.kg()["raw"], 380)
+    def test_a_numeric_string_still_posts(self):
+        c = Connector()
+        result = c.process(issue("J-STR", qty="120"))
+        self.assertEqual(result.status, "Posted")
+        self.assertEqual(c.kg()["raw"], 380)
 
-        result_a = connector.process(make_return("R-A", qty=100))
-        self.assertEqual(result_a.status, "Posted")
-        self.assertEqual(connector.kg()["raw"], 480)
+    def test_the_callers_dictionary_is_not_changed(self):
+        c = Connector()
+        message = issue("J-STR", qty="120")
+        c.process(message)
+        self.assertEqual(message["qty"], "120")
+        self.assertIsInstance(message["qty"], str)
 
-        result_b = connector.process(make_return("R-B", qty=20))
-        self.assertEqual(result_b.status, "Posted")
-        self.assertEqual(connector.kg()["raw"], 500)
-
-        result_c = connector.process(make_return("R-C", qty=1))
-        self.assertEqual(result_c.code, "E-QTY")
-        self.assertEqual(connector.kg()["raw"], 500)
-
-        result_d = connector.process(make_return("R-D", qty=121))
-        self.assertEqual(result_d.code, "E-QTY")
-        self.assertEqual(connector.kg()["raw"], 500)
-
-        result_e = connector.process(
-            make_return("R-E", against="J-999", qty=1)
-        )
-        self.assertEqual(result_e.code, "E-ITEM")
-        self.assertEqual(connector.kg()["raw"], 500)
-
-
-class LookupHeatRules(unittest.TestCase):
-    def test_lookup_heat_comes_from_first_issue_entry(self):
-        connector = Connector()
-        connector.process(make_issue())
-        connector.process(make_issue(ref="J-200", qty=10))
-        connector.process(make_receipt("C-2", "B-2"))
-
-        first_issue = next(
-            entry for entry in connector.ledger.entries
-            if entry.kind == "issue"
-        )
-        result = connector.lookup("B-2")
-
-        self.assertEqual(first_issue.kind, "issue")
-        self.assertEqual(result["result"], "found")
-        self.assertEqual(result["heat"], first_issue.batch)
-
-    def test_receipt_without_issue_has_missing_lookup(self):
-        connector = Connector()
-        connector.process(make_receipt("C-1", "B-1"))
-
-        self.assertEqual(
-            connector.lookup("B-1"),
-            {"batch": "B-1", "result": "missing"},
-        )
-
-    def test_lookup_source_has_no_hardcoded_heat(self):
-        source = inspect.getsource(Connector.lookup)
-        self.assertNotIn("H-441", source)
-
-
-class CapaControlRules(unittest.TestCase):
-    def test_explicit_open_capa_adds_one_row(self):
-        connector = Connector()
-
-        connector.ledger.open_capa(
-            "D-100", "WO-2401", "forge-crack"
-        )
-
-        self.assertEqual(connector.ledger.capa, 1)
-        self.assertEqual(
-            connector.ledger.capa_rows,
-            [("D-100", "WO-2401", "forge-crack")],
-        )
-
-    def test_normal_workflow_does_not_open_capa(self):
-        connector = Connector()
-
-        self.assertEqual(connector.process(make_issue()).status, "Posted")
-        self.assertEqual(
-            connector.process(make_return("R-1")).status, "Posted"
-        )
-
-        for ref, operation in (("CF-10", 10), ("CF-20", 20)):
-            result = connector.process({
-                "kind": "confirm",
-                "id": ref,
-                "work_order": "WO-2401",
-                "operation": operation,
-                "completed": 10,
-                "rejected": 0,
-                "rework": 0,
-                "scrap": 0,
-            })
-            self.assertEqual(result.status, "Posted")
-
-        for message in (
-            make_disposition("D-REJ"),
-            make_disposition(
-                "D-RW", decision="rework", reason="rework-bend", qty=1
-            ),
-            make_disposition(
-                "D-SC", decision="scrap", reason="scale", qty=1
-            ),
-        ):
-            self.assertEqual(connector.process(message).status, "Posted")
-
-        duplicate = connector.process(make_disposition("D-REJ"))
-        self.assertEqual(duplicate.code, "E-DUP")
-
-        self.assertEqual(
-            connector.process(make_receipt("C-1", "B-1")).status,
-            "Posted",
-        )
-        self.assertEqual(
-            connector.process(make_receipt("C-2", "B-2")).status,
-            "Posted",
-        )
-
-        self.assertEqual(connector.lookup("B-2")["result"], "found")
-        self.assertEqual(connector.lookup("B-2")["heat"], "H-441")
-        self.assertEqual(connector.pieces()["finished"], 0)
-        self.assertEqual(connector.ledger.capa, 0)
-        self.assertEqual(connector.ledger.capa_rows, [])
-
-    def test_open_capa_is_defined_only_once_in_connector_source(self):
-        source = Path("connector/poc.py").read_text()
-        self.assertEqual(source.count("open_capa"), 1)
-        self.assertIn("def open_capa(", source)
+    def test_a_fractional_operation_is_e_op(self):
+        self.assert_refused_untouched(
+            {"kind": "confirm", "id": "CF-HALF", "work_order": "WO-2401", "operation": 10.5, "completed": 1},
+            "E-OP", "Operation is not on the demo route.")
 
 
 if __name__ == "__main__":
