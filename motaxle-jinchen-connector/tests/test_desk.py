@@ -94,6 +94,8 @@ class DeskTests(unittest.TestCase):
 
     def test_piece_split_totals_100_and_finished_stays_zero(self):
         connector = Connector()
+        # A confirmation needs metal on the order (BR-36).
+        self.assertEqual(connector.process(issue()).status, "Posted")
 
         self.assertEqual(connector.process(confirm("CF-10", 10)).code, "")
         self.assertEqual(connector.process(confirm("CF-20", 20)).code, "")
