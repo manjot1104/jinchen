@@ -45,4 +45,27 @@ With Switch A on, issue, return, disposition, and receipt files are logged as Qu
 
 ## 7. Configuration
 
-`config.json` has `mode` and `live_password`. The committed file is test mode with an empty password. `server.py` and the inbox reader read it before they start. A filled password in test mode stops both with *Test mode refuses to start when a live password is set.* A mode other than `test` or `live` stops both with *Mode must be test or live.* Do not commit a password.
+`config.json` has `mode`, `live_password` and `weight`. The committed file is test mode with an empty password. `server.py` and the inbox reader read it before they start. A filled password in test mode stops both with *Test mode refuses to start when a live password is set.* A mode other than `test` or `live` stops both with *Mode must be test or live.* Do not commit a password.
+
+`weight` holds `kg_per_piece` (1.2) and `loss_allowance` (0.05). A confirmation is refused with E-QTY when its pieces × 1.2 kg need more than the steel still out on the order × 1.05. Leave the block out to use those two values. A bad value stops the desk with *config.json weight needs kg_per_piece above 0 and loss_allowance from 0 to 1.*
+
+## 8. Hold and cancel
+
+The Work order screen has **Hold**, **Resume** and **Cancel**. A held or cancelled order refuses issue, return, confirmation, disposition and receipt with E-CLOSED. Cancel is refused while steel is out, and after cancel the release stays refused.
+
+## More
+
+- [docs/message-contract.md](docs/message-contract.md): every field of every message, and the code returned when it is wrong. POC contract, not a signed Jinchen API.
+- [docs/run-book.md](docs/run-book.md): restart, switches, replay, and who owns the test passwords.
+- [docs/decisions.md](docs/decisions.md): the lead's decisions, with dates and the stories they unblock.
+
+## How we work
+
+- **One branch per task sheet part**, named `<person>-<topic>`, for example `ananya-rules` or `jashan-ci`. Branch from an up-to-date main. Never commit on main.
+- **One pull request per branch.** The title is the task's title from the sheet. The description lists the sheet task ids, the tests added by name, and the before and after figures.
+- **Review against the sheet.** The reviewer checks every Pass line of the tasks in the pull request, runs `python3 -m unittest discover tests` and `python3 prove.py`, and puts each rule back once to see its test go red. Juniors review each other; the lead reviews and merges.
+- **Green CI before merge.** Main requires the `test` check. A red check is fixed on the same branch with a new commit.
+- **Merge order is set by the lead** when two branches touch the same files. A later branch merges main in (no rebase, no force-push) and resolves conflicts there.
+- **poc.py changes only in the functions the sheet names.** Every sentence the code already returns stays word for word. raw 380, raw 384, hold 96 and finished 0 do not move. `tests/test_poc.py` and `demo.py` are not edited.
+- **Commits** are in the author's own name. The subject line says what, then a blank line, then a body that says why.
+- **Never commit** a password, a `.env` file, a live site URL, or files from `inbox/in`, `inbox/done` or `inbox/results`. No Jinchen web address, token or path.
