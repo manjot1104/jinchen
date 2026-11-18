@@ -163,7 +163,7 @@ def read_next(
     )
 
     if move_to_done:
-        source.rename(done_directory / source.name)
+        source.replace(done_directory / source.name)
 
     return result_data
 
