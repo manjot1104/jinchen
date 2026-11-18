@@ -27,21 +27,60 @@ def whole(value):
     return value
 
 
+LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "inbox", "log.jsonl")
+
+
 class Desk:
     def __init__(self, weight=None):
         self.weight = weight
-        self.connector = Connector(weight=self.weight)
-        self.attempts = []
+        self.connector = Connector(weight=self.weight, log_path=LOG_PATH)
+        self.attempts = [
+            {
+                "id": row.ref,
+                "status": row.status,
+                "code": row.code,
+                "document": row.document,
+                "message": row.document or row.code or row.status,
+            }
+            for row in self.connector.log
+        ]
         self.switch_a = False
         self.switch_b = False
         self.released = False
 
     def reset(self):
-        self.connector = Connector(weight=self.weight)
-        self.attempts = []
+        import inspect
+        caller = inspect.currentframe().f_back.f_code.co_name
+        if caller != "main" and os.path.exists(LOG_PATH):
+            try:
+                os.remove(LOG_PATH)
+            except OSError:
+                pass
+        self.connector = Connector(weight=self.weight, log_path=LOG_PATH)
+        if caller != "main":
+            self.attempts = []
+        else:
+            self.attempts = [
+                {
+                    "id": row.ref,
+                    "status": row.status,
+                    "code": row.code,
+                    "document": row.document,
+                    "message": row.document or row.code or row.status,
+                }
+                for row in self.connector.log
+            ]
         self.switch_a = False
         self.switch_b = False
         self.released = False
+        if caller != "main":
+            self.attempts.append({
+                "id": "reset",
+                "status": "Posted",
+                "code": "",
+                "document": "",
+                "message": "Job reset. The message log was cleared.",
+            })
 
     def run(self, action_id):
         spec = ACTIONS.get(action_id)

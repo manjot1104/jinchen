@@ -149,16 +149,45 @@ class Ledger:
 
 
 class Connector:
-    def __init__(self, mode="test", live_password="", weight=None):
+    def __init__(self, mode="test", live_password="", weight=None, log_path=None):
         require_test_mode(mode, live_password)
         self.mode = mode
         self.weight = dict(DEFAULT_WEIGHT)
         if weight:
             self.weight.update(weight)
+        self.log_path = log_path
         self.order_state = {}
         self.order_events = []
         self.ledger = Ledger()
         self.log = []
+        if self.log_path:
+            import json
+            from pathlib import Path
+            p = Path(self.log_path)
+            if p.is_file():
+                try:
+                    for line in p.read_text(encoding="utf-8").splitlines():
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            obj = json.loads(line)
+                            if isinstance(obj, dict):
+                                self.log.append(
+                                    LogRow(
+                                        ref=obj.get("ref", ""),
+                                        work_order=obj.get("work_order", ""),
+                                        kind=obj.get("kind", ""),
+                                        status=obj.get("status", ""),
+                                        code=obj.get("code", ""),
+                                        document=obj.get("document", ""),
+                                        quantities=dict(obj.get("quantities") or {}),
+                                    )
+                                )
+                        except (json.JSONDecodeError, UnicodeDecodeError):
+                            continue
+                except Exception:
+                    pass
         self.confirmations = []
         self.output_batches = {}
         self.inspection_required = True
@@ -170,7 +199,23 @@ class Connector:
     def _log(self, ref, work_order, kind, status, code, document, drop_log, quantities=None):
         if drop_log:
             return
-        self.log.append(LogRow(ref, work_order, kind, status, code, document, dict(quantities or {})))
+        row = LogRow(ref, work_order, kind, status, code, document, dict(quantities or {}))
+        self.log.append(row)
+        if self.log_path:
+            import json
+            from pathlib import Path
+            Path(self.log_path).parent.mkdir(parents=True, exist_ok=True)
+            row_dict = {
+                "ref": ref,
+                "work_order": work_order,
+                "kind": kind,
+                "status": status,
+                "code": code,
+                "document": document,
+                "quantities": dict(quantities or {}),
+            }
+            with open(self.log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(row_dict) + "\n")
 
     def _done(self, status, code, document, message, ref, work_order, kind, drop_log, quantities=None):
         self._log(ref, work_order, kind, status, code, document, drop_log, quantities)

@@ -103,6 +103,22 @@ class ReconcileTests(unittest.TestCase):
             result = reconcile(connector, results_dir)
             self.assertIn("array.json", result["unreadable"])
 
+    def test_e_dup_receipt_counts_in_stock_results_with_no_gaps(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            connector, results_dir = self.run_samples(root)
+            inbox_dir = root / "in"
+            done_dir = root / "done"
+            tenth = inbox_dir / "10-receipt-C-1-repeat.json"
+            shutil.copy2(SAMPLES / "08-receipt-C-1.json", tenth)
+            read_all(connector, inbox_dir=inbox_dir, done_dir=done_dir, results_dir=results_dir)
+            result = reconcile(connector, results_dir)
+            self.assertEqual(result["stock_results"], 8)
+            self.assertEqual(result["entries"], 7)
+            self.assertEqual(result["missing_entry"], [])
+            self.assertEqual(result["missing_result"], [])
+            self.assertEqual(result["unreadable"], [])
+
 
 if __name__ == "__main__":
     unittest.main()
