@@ -4,7 +4,7 @@ import json
 import shutil
 from pathlib import Path
 
-from connector.poc import ConfigError, require_test_mode
+from connector.poc import DEFAULT_WEIGHT, ConfigError, require_test_mode
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -17,7 +17,9 @@ CONFIG_PATH = PROJECT_ROOT / "config.json"
 def load_config(path=None):
     """Read config.json and refuse to continue unless test mode is clean.
 
-    Returns {"mode": ..., "live_password": ...}. Raises ConfigError with the
+    Returns {"mode": ..., "live_password": ..., "weight": {...}}. The weight
+    block (US-081) is optional; a missing key takes DEFAULT_WEIGHT. Raises
+    ConfigError with the
     sentences already in connector.poc when the mode is wrong or a live
     password is set in test mode. The password is never printed.
     """
@@ -34,7 +36,27 @@ def load_config(path=None):
     mode = data.get("mode")
     live_password = data.get("live_password") or ""
     require_test_mode(mode, live_password)
-    return {"mode": mode, "live_password": live_password}
+    return {"mode": mode, "live_password": live_password, "weight": _weight(data.get("weight"))}
+
+
+WEIGHT_SENTENCE = "config.json weight needs kg_per_piece above 0 and loss_allowance from 0 to 1."
+
+
+def _weight(block):
+    if block is None:
+        return dict(DEFAULT_WEIGHT)
+    if not isinstance(block, dict):
+        raise ConfigError(WEIGHT_SENTENCE)
+    weight = dict(DEFAULT_WEIGHT)
+    weight.update(block)
+    per_piece = weight["kg_per_piece"]
+    allowance = weight["loss_allowance"]
+    for value in (per_piece, allowance):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ConfigError(WEIGHT_SENTENCE)
+    if per_piece <= 0 or not 0 <= allowance <= 1:
+        raise ConfigError(WEIGHT_SENTENCE)
+    return {"kg_per_piece": float(per_piece), "loss_allowance": float(allowance)}
 
 STOCK_KINDS = {"issue", "return", "disposition", "receipt"}
 

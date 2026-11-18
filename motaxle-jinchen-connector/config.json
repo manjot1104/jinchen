@@ -1,4 +1,8 @@
 {
   "mode": "test",
-  "live_password": ""
+  "live_password": "",
+  "weight": {
+    "kg_per_piece": 1.2,
+    "loss_allowance": 0.05
+  }
 }

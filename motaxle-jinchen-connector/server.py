@@ -28,15 +28,16 @@ def whole(value):
 
 
 class Desk:
-    def __init__(self):
-        self.connector = Connector()
+    def __init__(self, weight=None):
+        self.weight = weight
+        self.connector = Connector(weight=self.weight)
         self.attempts = []
         self.switch_a = False
         self.switch_b = False
         self.released = False
 
     def reset(self):
-        self.connector = Connector()
+        self.connector = Connector(weight=self.weight)
         self.attempts = []
         self.switch_a = False
         self.switch_b = False
@@ -127,7 +128,16 @@ class Desk:
         return True
 
     def release(self):
-        if self.switch_b:
+        # US-082: a cancelled order stays cancelled, whoever presses Release.
+        if self.connector.order_state.get("WO-2401") == "cancelled":
+            row = {
+                "id": "release",
+                "status": "Business Rejected",
+                "code": "E-CLOSED",
+                "document": "",
+                "message": "WO-2401 is cancelled. The release was not sent.",
+            }
+        elif self.switch_b:
             row = {
                 "id": "release",
                 "status": "Stopped",
@@ -220,6 +230,7 @@ class Desk:
             "switch_a": self.switch_a,
             "switch_b": self.switch_b,
             "released": self.released,
+            "order_state": self.connector.order_state.get("WO-2401", "open"),
             "result": result,
             "inbox_files": [item.name for item in list_inbox()],
         }
@@ -321,6 +332,9 @@ ACTIONS = {
         "kind": "receipt", "id": "C-NONE", "work_order": "WO-2401",
         "item": "CR-100", "qty": 1, "uom": "Nos", "batch": "",
     }},
+    "hold": {"message": {"kind": "hold", "id": "H-1", "work_order": "WO-2401"}},
+    "resume": {"message": {"kind": "resume", "id": "RS-1", "work_order": "WO-2401"}},
+    "cancel": {"message": {"kind": "cancel", "id": "X-1", "work_order": "WO-2401"}},
 }
 
 CATALOG = [
@@ -347,6 +361,9 @@ CATALOG = [
     {"id": "c1-again", "screen": "quality", "group": "Checks", "title": "Send C-1 again", "lines": [["Same id", "C-1"], ["Expect", "Hold stays 96"]]},
     {"id": "c-bad", "screen": "quality", "group": "Checks", "title": "Put rejects in finished goods", "lines": [["Qty", "2"], ["To", "Finished Goods Store"], ["Expect", "Blocked"]]},
     {"id": "no-batch", "screen": "quality", "group": "Checks", "title": "Receive with no batch", "lines": [["Batch", "Blank"], ["Expect", "Batch required"]]},
+    {"id": "hold", "screen": "order", "group": "Hold and cancel", "title": "Hold WO-2401", "lines": [["Message", "H-1"], ["Expect", "Stock messages return E-CLOSED"]]},
+    {"id": "resume", "screen": "order", "group": "Hold and cancel", "title": "Resume WO-2401", "lines": [["Message", "RS-1"], ["Expect", "Open again"]]},
+    {"id": "cancel", "screen": "order", "group": "Hold and cancel", "title": "Cancel WO-2401", "lines": [["Message", "X-1"], ["Expect", "Refused while steel is out"]]},
 ]
 
 SCREENS = {
@@ -622,11 +639,13 @@ function paint() {
     "<tr><td>Heat</td><td>H-441, batch tracked</td></tr>" +
     "<tr><td>Issued</td><td>" + state.issued + " kg</td></tr>" +
     "<tr><td>Returned</td><td>" + state.returned + " kg</td></tr>" +
-    "<tr><td>Still in forging WIP</td><td>" + state.bins.wip + " kg</td></tr></table></section>" +
+    "<tr><td>Still in forging WIP</td><td>" + state.bins.wip + " kg</td></tr>" +
+    "<tr><td>State</td><td>" + state.order_state + "</td></tr></table></section>" +
     '<section class="panel" style="margin-top:12px"><h2>Route</h2><table><tr><th>Op</th><th>Name</th><th>Where</th><th>Status</th></tr>' +
     state.operations.map(function (op) {
       return "<tr><td>" + op.op + "</td><td>" + op.name + "</td><td>" + op.where + "</td><td>" + op.state + "</td></tr>";
-    }).join("") + '</table><p class="muted">Confirming an operation does not receive the rod into stock.</p></section>';
+    }).join("") + '</table><p class="muted">Confirming an operation does not receive the rod into stock.</p></section>' +
+    '<section class="panel" style="margin-top:12px"><h2>Hold and cancel</h2><p class="muted">A held or cancelled order refuses issue, return, confirmation, disposition and receipt with E-CLOSED. Cancel is final, and is refused while steel is still out.</p>' + cards("order") + "</section>";
 
   document.getElementById("view-material").innerHTML = '<section class="panel"><h2>Steel for heat H-441</h2><p class="muted">Raw store and forging WIP are kilograms. A repeated message must not move the metal twice.</p>' + cards("material") + "</section>";
   document.getElementById("view-operations").innerHTML = '<section class="panel"><h2>Report what the floor finished</h2><p class="muted">Cutting and forging can be confirmed. Heat treatment is vendor work. Finished goods does not change on this screen.</p>' + cards("operations") + "</section>";
@@ -983,11 +1002,13 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     try:
-        load_config()
+        config = load_config()
     except ConfigError as exc:
         print(str(exc), flush=True)
         print("The desk did not start.", flush=True)
         return 1
+    DESK.weight = config["weight"]
+    DESK.reset()
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     print("Open http://%s:%d" % (HOST, PORT), flush=True)
     print("Ctrl+C stops it.", flush=True)

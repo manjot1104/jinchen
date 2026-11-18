@@ -22,6 +22,14 @@ REASONS = {
     "rework-bend": "rework",
     "scale": "scrap",
 }
+# Weight rule (US-081). The desk reads it from config.json (see
+# connector.inbox.load_config); these are the values a bare Connector() uses.
+DEFAULT_WEIGHT = {"kg_per_piece": 1.20, "loss_allowance": 0.05}
+
+ORDER_QTY = 100  # WO-2401 is an order for 100 pieces of CR-100.
+WORK_ORDER_KINDS = ("hold", "resume", "cancel")
+CLOSED_KINDS = ("issue", "return", "confirm", "disposition", "receipt")
+
 DECISION_WAREHOUSE = {
     "rejection": REJECTION,
     "rework": REWORK,
@@ -83,6 +91,7 @@ class LogRow:
     status: str
     code: str
     document: str
+    quantities: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -140,9 +149,14 @@ class Ledger:
 
 
 class Connector:
-    def __init__(self, mode="test", live_password=""):
+    def __init__(self, mode="test", live_password="", weight=None):
         require_test_mode(mode, live_password)
         self.mode = mode
+        self.weight = dict(DEFAULT_WEIGHT)
+        if weight:
+            self.weight.update(weight)
+        self.order_state = {}
+        self.order_events = []
         self.ledger = Ledger()
         self.log = []
         self.confirmations = []
@@ -153,13 +167,13 @@ class Connector:
     def _seed(self):
         self.ledger.add(RAW, "ST-20", "H-441", 500.0)
 
-    def _log(self, ref, work_order, kind, status, code, document, drop_log):
+    def _log(self, ref, work_order, kind, status, code, document, drop_log, quantities=None):
         if drop_log:
             return
-        self.log.append(LogRow(ref, work_order, kind, status, code, document))
+        self.log.append(LogRow(ref, work_order, kind, status, code, document, dict(quantities or {})))
 
-    def _done(self, status, code, document, message, ref, work_order, kind, drop_log):
-        self._log(ref, work_order, kind, status, code, document, drop_log)
+    def _done(self, status, code, document, message, ref, work_order, kind, drop_log, quantities=None):
+        self._log(ref, work_order, kind, status, code, document, drop_log, quantities)
         return Result(status, code, document, message)
 
     def process(self, message, drop_log=False):
@@ -174,6 +188,11 @@ class Connector:
         existing = self.ledger.find(ref, work_order, kind)
         if existing and kind in ("issue", "return", "disposition", "receipt"):
             return self._done("Posted", "E-DUP", existing.name, "Already posted. No second stock entry.", ref, work_order, kind, drop_log)
+        if kind in WORK_ORDER_KINDS:
+            return self._work_order(message, kind, drop_log)
+        state = self.order_state.get(work_order)
+        if state and kind in CLOSED_KINDS:
+            return self._done("Business Rejected", "E-CLOSED", "", "Work order is " + state + ".", ref, work_order, kind, drop_log)
         handler = {
             "issue": self._issue,
             "return": self._return,
@@ -273,10 +292,64 @@ class Connector:
             return self._done("Business Rejected", "E-OP", "", "Operation is not on the demo route.", ref, work_order, "confirm", drop_log)
         if any(n < 0 for n in numbers):
             return self._done("Business Rejected", "E-QTY", "", "A quantity is negative.", ref, work_order, "confirm", drop_log)
-        if numbers[0] > 100:
+        # US-079: good, rejected, rework and scrap are pieces of the same order.
+        # Kilograms never enter this sum.
+        if sum(numbers) > ORDER_QTY:
             return self._done("Business Rejected", "E-QTY", "", "Completed pieces are above the order.", ref, work_order, "confirm", drop_log)
+        # US-080: no progress on an order that has no metal on the floor.
+        out_kg = self._kg_out(work_order)
+        if out_kg <= 0:
+            return self._done("Business Rejected", "E-QTY", "", "No metal was issued on this work order.", ref, work_order, "confirm", drop_log)
+        # US-081: the pieces must fit the steel still out, plus the loss allowance.
+        needed = sum(numbers) * self.weight["kg_per_piece"]
+        allowed = out_kg * (1 + self.weight["loss_allowance"])
+        if needed > allowed + 1e-9:
+            return self._done("Business Rejected", "E-QTY", "", "Pieces need more steel than was issued.", ref, work_order, "confirm", drop_log)
+        quantities = dict(zip(("completed", "rejected", "rework", "scrap"), numbers))
         self.confirmations.append((work_order, operation, tuple(numbers)))
-        return self._done("Posted", "", "", "Confirmation stored. Finished goods unchanged.", ref, work_order, "confirm", drop_log)
+        return self._done("Posted", "", "", "Confirmation stored. Finished goods unchanged.", ref, work_order, "confirm", drop_log, quantities)
+
+    def _kg_out(self, work_order):
+        """Steel issued to this work order and not returned, in kilograms."""
+        out = 0.0
+        for entry in self.ledger.entries:
+            if entry.work_order != work_order:
+                continue
+            if entry.kind == "issue":
+                out += entry.qty
+            elif entry.kind == "return":
+                out -= entry.qty
+        return out
+
+    def _work_order(self, message, kind, drop_log):
+        """US-082: hold, resume and cancel. No stock moves.
+
+        Each has its own repeat key (id, work order, kind). Cancel is final,
+        and is refused while steel is still out on the order.
+        """
+        ref = message["id"]
+        work_order = message["work_order"]
+        key = (ref, work_order, kind)
+        if key in self.order_events:
+            return self._done("Posted", "E-DUP", "", "Already applied.", ref, work_order, kind, drop_log)
+        state = self.order_state.get(work_order)
+        if state == "cancelled":
+            return self._done("Business Rejected", "E-CLOSED", "", "Work order is cancelled.", ref, work_order, kind, drop_log)
+        if kind == "cancel" and self._kg_out(work_order) > 0:
+            return self._done("Business Rejected", "E-QTY", "", "Steel is still out. Return or scrap it before cancel.", ref, work_order, kind, drop_log)
+        if kind == "resume" and state != "on hold":
+            return self._done("Business Rejected", "E-OP", "", "Work order is not on hold.", ref, work_order, kind, drop_log)
+        if kind == "hold":
+            self.order_state[work_order] = "on hold"
+            sentence = "Work order is on hold."
+        elif kind == "cancel":
+            self.order_state[work_order] = "cancelled"
+            sentence = "Work order is cancelled."
+        else:
+            self.order_state.pop(work_order, None)
+            sentence = "Work order resumed."
+        self.order_events.append(key)
+        return self._done("Posted", "", "", sentence, ref, work_order, kind, drop_log)
 
     def _disposition(self, message, drop_log):
         ref = message["id"]

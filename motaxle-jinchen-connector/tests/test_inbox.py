@@ -79,6 +79,9 @@ class InboxTests(unittest.TestCase):
             shutil.copy2(samples / confirm_file, inbox / confirm_file)
 
             connector = Connector()
+            # A confirmation needs metal on the order (BR-36), so J-099 is
+            # posted directly. The queued J-100 file must still post nothing.
+            connector.process(dict(json.loads((samples / issue_file).read_text()), id="J-099"))
 
             outcomes = read_all(
                 connector,
@@ -93,7 +96,8 @@ class InboxTests(unittest.TestCase):
             self.assertEqual(outcomes[1]["status"], "Posted")
 
             # Switch A must prevent stock posting, not confirmation processing.
-            self.assertEqual(connector.kg(), {"raw": 500, "wip": 0})
+            self.assertEqual(connector.kg(), {"raw": 380, "wip": 120})
+            self.assertEqual(len(connector.ledger.entries), 1)
 
             # Queued stock file stays in inbox; confirmation is completed.
             self.assertTrue((inbox / issue_file).exists())
@@ -237,6 +241,7 @@ class InboxTests(unittest.TestCase):
             (inbox / "01-boom.json").write_text('{"kind": "issue", "id": "J-BOOM", "work_order": "WO-2401"}')
             shutil.copy2(SAMPLES / "03-confirm-op10.json", inbox / "03-confirm-op10.json")
             connector = Connector()
+            connector.process(json.loads((SAMPLES / ISSUE_FILE).read_text()))
             real = connector.process
 
             def explode_once(message, drop_log=False):
