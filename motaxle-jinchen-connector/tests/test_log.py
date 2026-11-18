@@ -106,19 +106,43 @@ class LogTests(unittest.TestCase):
     def test_desk_reset_clears_log_file_and_records_message(self):
         with tempfile.TemporaryDirectory() as temp:
             log_file = Path(temp) / "log.jsonl"
+            desk = Desk(log_path=str(log_file))
+            desk.run("confirm-10")
+            self.assertTrue(log_file.exists())
+            desk.reset()
+            self.assertFalse(log_file.exists())
+            self.assertEqual(len(desk.attempts), 1)
+            self.assertEqual(desk.attempts[0]["id"], "reset")
+            self.assertEqual(desk.attempts[0]["status"], "Posted")
+            self.assertEqual(
+                desk.attempts[0]["message"],
+                "Job reset. The message log was cleared.",
+            )
+
+    def test_desk_with_no_log_path_creates_no_file(self):
+        with tempfile.TemporaryDirectory() as temp:
+            log_file = Path(temp) / "log.jsonl"
             with mock.patch("server.LOG_PATH", str(log_file)):
                 desk = Desk()
-                desk.run("confirm-10")
-                self.assertTrue(log_file.exists())
-                desk.reset()
+                desk.run("issue")
                 self.assertFalse(log_file.exists())
-                self.assertEqual(len(desk.attempts), 1)
-                self.assertEqual(desk.attempts[0]["id"], "reset")
-                self.assertEqual(desk.attempts[0]["status"], "Posted")
-                self.assertEqual(
-                    desk.attempts[0]["message"],
-                    "Job reset. The message log was cleared.",
-                )
+
+    def test_desk_restart_loads_same_three_rows_in_attempts(self):
+        with tempfile.TemporaryDirectory() as temp:
+            log_file = Path(temp) / "log.jsonl"
+            desk1 = Desk(log_path=str(log_file))
+            desk1.run("confirm-10")
+            desk1.run("confirm-20")
+            desk1.run("confirm-30")
+            self.assertEqual(len(desk1.attempts), 3)
+
+            desk2 = Desk(log_path=str(log_file))
+            self.assertEqual(len(desk2.attempts), 3)
+            for row in desk2.attempts:
+                self.assertEqual(row["message"], "Read back from the log file.")
+            self.assertEqual(desk2.attempts[0]["id"], "CF-10")
+            self.assertEqual(desk2.attempts[1]["id"], "CF-20")
+            self.assertEqual(desk2.attempts[2]["id"], "CF-30")
 
     def test_log_file_contains_no_password(self):
         with tempfile.TemporaryDirectory() as temp:

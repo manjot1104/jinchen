@@ -31,16 +31,17 @@ LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "inbox", "lo
 
 
 class Desk:
-    def __init__(self, weight=None):
+    def __init__(self, weight=None, log_path=None):
         self.weight = weight
-        self.connector = Connector(weight=self.weight, log_path=LOG_PATH)
+        self.log_path = log_path
+        self.connector = Connector(weight=self.weight, log_path=self.log_path)
         self.attempts = [
             {
                 "id": row.ref,
                 "status": row.status,
                 "code": row.code,
                 "document": row.document,
-                "message": row.document or row.code or row.status,
+                "message": "Read back from the log file.",
             }
             for row in self.connector.log
         ]
@@ -49,38 +50,23 @@ class Desk:
         self.released = False
 
     def reset(self):
-        import inspect
-        caller = inspect.currentframe().f_back.f_code.co_name
-        if caller != "main" and os.path.exists(LOG_PATH):
+        if self.log_path and os.path.exists(self.log_path):
             try:
-                os.remove(LOG_PATH)
+                os.remove(self.log_path)
             except OSError:
                 pass
-        self.connector = Connector(weight=self.weight, log_path=LOG_PATH)
-        if caller != "main":
-            self.attempts = []
-        else:
-            self.attempts = [
-                {
-                    "id": row.ref,
-                    "status": row.status,
-                    "code": row.code,
-                    "document": row.document,
-                    "message": row.document or row.code or row.status,
-                }
-                for row in self.connector.log
-            ]
+        self.connector = Connector(weight=self.weight, log_path=self.log_path)
+        self.attempts = []
         self.switch_a = False
         self.switch_b = False
         self.released = False
-        if caller != "main":
-            self.attempts.append({
-                "id": "reset",
-                "status": "Posted",
-                "code": "",
-                "document": "",
-                "message": "Job reset. The message log was cleared.",
-            })
+        self.attempts.append({
+            "id": "reset",
+            "status": "Posted",
+            "code": "",
+            "document": "",
+            "message": "Job reset. The message log was cleared.",
+        })
 
     def run(self, action_id):
         spec = ACTIONS.get(action_id)
@@ -1040,14 +1026,14 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
+    global DESK
     try:
         config = load_config()
     except ConfigError as exc:
         print(str(exc), flush=True)
         print("The desk did not start.", flush=True)
         return 1
-    DESK.weight = config["weight"]
-    DESK.reset()
+    DESK = Desk(weight=config["weight"], log_path=LOG_PATH)
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     print("Open http://%s:%d" % (HOST, PORT), flush=True)
     print("Ctrl+C stops it.", flush=True)

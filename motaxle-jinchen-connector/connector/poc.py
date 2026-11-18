@@ -6,7 +6,9 @@ No network call is made. Field names are the POC contract, not a signed API.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
+from pathlib import Path
 
 
 RAW = "Raw Material Store"
@@ -161,8 +163,6 @@ class Connector:
         self.ledger = Ledger()
         self.log = []
         if self.log_path:
-            import json
-            from pathlib import Path
             p = Path(self.log_path)
             if p.is_file():
                 try:
@@ -186,7 +186,7 @@ class Connector:
                                 )
                         except (json.JSONDecodeError, UnicodeDecodeError):
                             continue
-                except Exception:
+                except OSError:
                     pass
         self.confirmations = []
         self.output_batches = {}
@@ -202,8 +202,6 @@ class Connector:
         row = LogRow(ref, work_order, kind, status, code, document, dict(quantities or {}))
         self.log.append(row)
         if self.log_path:
-            import json
-            from pathlib import Path
             Path(self.log_path).parent.mkdir(parents=True, exist_ok=True)
             row_dict = {
                 "ref": ref,
