@@ -130,6 +130,31 @@ class ConfigTests(unittest.TestCase):
         built.assert_called_once_with((server.HOST, server.PORT), server.Handler)
         built.return_value.serve_forever.assert_called_once()
 
+    def test_prove_main_refuses_a_filled_password(self):
+        import prove
+        with tempfile.TemporaryDirectory() as temp:
+            path = write_config(temp, "test", "live-secret")
+            with mock.patch.object(inbox, "CONFIG_PATH", path), \
+                 mock.patch("builtins.print") as printed:
+                with self.assertRaises(SystemExit) as caught:
+                    prove.main()
+        self.assertEqual(caught.exception.code, 1)
+        lines = [call.args[0] for call in printed.call_args_list if call.args]
+        self.assertEqual(lines, [PASSWORD_SENTENCE])
+        self.assertNotIn("live-secret", " ".join(lines))
+
+    def test_prove_main_refuses_a_bad_mode(self):
+        import prove
+        with tempfile.TemporaryDirectory() as temp:
+            path = write_config(temp, "demo", "")
+            with mock.patch.object(inbox, "CONFIG_PATH", path), \
+                 mock.patch("builtins.print") as printed:
+                with self.assertRaises(SystemExit) as caught:
+                    prove.main()
+        self.assertEqual(caught.exception.code, 1)
+        lines = [call.args[0] for call in printed.call_args_list if call.args]
+        self.assertEqual(lines, [MODE_SENTENCE])
+
 
 if __name__ == "__main__":
     unittest.main()
