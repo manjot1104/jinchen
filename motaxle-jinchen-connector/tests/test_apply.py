@@ -1,19 +1,18 @@
 """Desk.apply must not change the shared ACTIONS catalog."""
-import socket
+import importlib
 import unittest
+from unittest import mock
 
+import server
 from server import ACTIONS, Desk
-
-
-def port_open(port=8765):
-    with socket.socket() as sock:
-        sock.settimeout(0.2)
-        return sock.connect_ex(("127.0.0.1", port)) == 0
 
 
 class DeskApplyTests(unittest.TestCase):
     def test_importing_server_does_not_bind_the_port(self):
-        self.assertFalse(port_open())
+        with mock.patch("http.server.ThreadingHTTPServer") as built:
+            importlib.reload(server)
+            built.assert_not_called()
+        importlib.reload(server)
 
     def test_catalog_qty_is_still_the_integer_120_after_a_click(self):
         before = ACTIONS["issue"]["message"]["qty"]

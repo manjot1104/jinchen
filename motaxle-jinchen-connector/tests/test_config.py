@@ -1,6 +1,5 @@
 import json
 import shutil
-import socket
 import tempfile
 import unittest
 from pathlib import Path
@@ -20,12 +19,6 @@ def write_config(folder, mode, live_password):
     path = Path(folder) / "config.json"
     path.write_text(json.dumps({"mode": mode, "live_password": live_password}))
     return path
-
-
-def port_open(port=8765):
-    with socket.socket() as sock:
-        sock.settimeout(0.2)
-        return sock.connect_ex(("127.0.0.1", port)) == 0
 
 
 class ConfigTests(unittest.TestCase):
@@ -101,14 +94,14 @@ class ConfigTests(unittest.TestCase):
 
     def test_server_main_does_not_start_with_a_filled_password(self):
         import server  # importing must not bind the port
-        self.assertFalse(port_open())
         with tempfile.TemporaryDirectory() as temp:
             path = write_config(temp, "test", "live-secret")
-            with mock.patch.object(inbox, "CONFIG_PATH", path):
-                with mock.patch("builtins.print") as printed:
-                    code = server.main()
+            with mock.patch.object(inbox, "CONFIG_PATH", path), \
+                 mock.patch.object(server, "ThreadingHTTPServer") as built, \
+                 mock.patch("builtins.print") as printed:
+                code = server.main()
         self.assertEqual(code, 1)
-        self.assertFalse(port_open())
+        built.assert_not_called()
         lines = [call.args[0] for call in printed.call_args_list if call.args]
         self.assertIn(PASSWORD_SENTENCE, lines)
         self.assertNotIn("live-secret", " ".join(lines))
@@ -117,13 +110,25 @@ class ConfigTests(unittest.TestCase):
         import server
         with tempfile.TemporaryDirectory() as temp:
             path = write_config(temp, "demo", "")
-            with mock.patch.object(inbox, "CONFIG_PATH", path):
-                with mock.patch("builtins.print") as printed:
-                    code = server.main()
+            with mock.patch.object(inbox, "CONFIG_PATH", path), \
+                 mock.patch.object(server, "ThreadingHTTPServer") as built, \
+                 mock.patch("builtins.print") as printed:
+                code = server.main()
         self.assertEqual(code, 1)
-        self.assertFalse(port_open())
+        built.assert_not_called()
         lines = [call.args[0] for call in printed.call_args_list if call.args]
         self.assertIn(MODE_SENTENCE, lines)
+
+    def test_server_main_builds_a_server_with_a_good_config(self):
+        import server
+        with tempfile.TemporaryDirectory() as temp:
+            path = write_config(temp, "test", "")
+            with mock.patch.object(inbox, "CONFIG_PATH", path), \
+                 mock.patch.object(server, "ThreadingHTTPServer") as built, \
+                 mock.patch("builtins.print"):
+                server.main()
+        built.assert_called_once_with((server.HOST, server.PORT), server.Handler)
+        built.return_value.serve_forever.assert_called_once()
 
 
 if __name__ == "__main__":
