@@ -140,7 +140,8 @@ class ConfigTests(unittest.TestCase):
                     prove.main()
         self.assertEqual(caught.exception.code, 1)
         lines = [call.args[0] for call in printed.call_args_list if call.args]
-        self.assertEqual(lines, [PASSWORD_SENTENCE])
+        self.assertEqual(lines, [PASSWORD_SENTENCE, "prove.py did not run"])
+        self.assertFalse(any(str(line).startswith("TC-02") for line in lines))
         self.assertNotIn("live-secret", " ".join(lines))
 
     def test_prove_main_refuses_a_bad_mode(self):
@@ -153,7 +154,8 @@ class ConfigTests(unittest.TestCase):
                     prove.main()
         self.assertEqual(caught.exception.code, 1)
         lines = [call.args[0] for call in printed.call_args_list if call.args]
-        self.assertEqual(lines, [MODE_SENTENCE])
+        self.assertEqual(lines, [MODE_SENTENCE, "prove.py did not run"])
+        self.assertFalse(any(str(line).startswith("TC-02") for line in lines))
 
     def test_prove_main_loads_config_once_and_propagates_it(self):
         import prove

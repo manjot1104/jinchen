@@ -83,6 +83,7 @@ def main():
         config = load_config()
     except ConfigError as exc:
         print(str(exc))
+        print("prove.py did not run")
         raise SystemExit(1)
 
     def tc02():
