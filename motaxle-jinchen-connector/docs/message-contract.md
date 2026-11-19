@@ -68,7 +68,7 @@ Checks across the fields, in this order:
 2. Steel is out on this work order (issued minus returned above 0): E-QTY *No metal was issued on this work order.* (US-080)
 3. The pieces × kg_per_piece is not above the steel out × (1 + loss_allowance), both from `config.json`: E-QTY *Pieces need more steel than was issued.* (US-081)
 
-A confirmation never creates a stock entry. The four quantities are stored separately on the log row. A repeated confirmation is not checked for E-DUP in the stand-in.
+A confirmation never creates a stock entry. The four quantities are stored separately on the log row. A repeated confirmation (same id, work order and operation) returns E-DUP *Already confirmed. Not stored again.* and is not stored.
 
 ## disposition (samples 05, 06 and 07)
 

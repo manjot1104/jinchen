@@ -46,7 +46,7 @@ A replay must never move stock twice. This is how to show it:
 
 Replay on the desk: **Send J-100 again**, **Send R-1 again** and **Send C-1 again** do the same from buttons.
 
-A confirmation is not checked for repeats in the stand-in. Replaying `03-confirm-op10.json` stores it a second time. It moves no stock.
+A replayed confirmation gives E-DUP (*Already confirmed. Not stored again.*) and is not stored a second time. It moves no stock.
 
 ## Hold and cancel
 

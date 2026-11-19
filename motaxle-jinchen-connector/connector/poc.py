@@ -160,6 +160,7 @@ class Connector:
         self.ledger = Ledger()
         self.log = []
         self.confirmations = []
+        self.confirm_keys = set()
         self.output_batches = {}
         self.inspection_required = True
         self._seed()
@@ -306,6 +307,10 @@ class Connector:
         if needed > allowed + 1e-9:
             return self._done("Business Rejected", "E-QTY", "", "Pieces need more steel than was issued.", ref, work_order, "confirm", drop_log)
         quantities = dict(zip(("completed", "rejected", "rework", "scrap"), numbers))
+        key = (ref, work_order, operation)
+        if key in self.confirm_keys:
+            return self._done("Posted", "E-DUP", "", "Already confirmed. Not stored again.", ref, work_order, "confirm", drop_log, quantities)
+        self.confirm_keys.add(key)
         self.confirmations.append((work_order, operation, tuple(numbers)))
         return self._done("Posted", "", "", "Confirmation stored. Finished goods unchanged.", ref, work_order, "confirm", drop_log, quantities)
 
