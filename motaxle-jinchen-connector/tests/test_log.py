@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -121,11 +122,16 @@ class LogTests(unittest.TestCase):
 
     def test_desk_with_no_log_path_creates_no_file(self):
         with tempfile.TemporaryDirectory() as temp:
-            log_file = Path(temp) / "log.jsonl"
-            with mock.patch("server.LOG_PATH", str(log_file)):
+            old_cwd = os.getcwd()
+            os.chdir(temp)
+            try:
                 desk = Desk()
-                desk.run("issue")
-                self.assertFalse(log_file.exists())
+                self.assertIsNone(desk.log_path)
+                desk.run("confirm-10")
+                self.assertFalse((Path(temp) / "inbox" / "log.jsonl").exists())
+                self.assertFalse((Path(temp) / "log.jsonl").exists())
+            finally:
+                os.chdir(old_cwd)
 
     def test_desk_restart_loads_same_three_rows_in_attempts(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -140,9 +146,9 @@ class LogTests(unittest.TestCase):
             self.assertEqual(len(desk2.attempts), 3)
             for row in desk2.attempts:
                 self.assertEqual(row["message"], "Read back from the log file.")
-            self.assertEqual(desk2.attempts[0]["id"], "CF-10")
-            self.assertEqual(desk2.attempts[1]["id"], "CF-20")
-            self.assertEqual(desk2.attempts[2]["id"], "CF-30")
+            self.assertEqual(desk2.attempts[0]["id"], "confirm-10")
+            self.assertEqual(desk2.attempts[1]["id"], "confirm-20")
+            self.assertEqual(desk2.attempts[2]["id"], "confirm-30")
 
     def test_log_file_contains_no_password(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -156,6 +162,91 @@ class LogTests(unittest.TestCase):
             self.assertNotIn("password", content.lower())
             self.assertNotIn("live_password", content)
 
+    def test_duplicate_rejected_after_restart(self):
+        with tempfile.TemporaryDirectory() as temp:
+            log_file = Path(temp) / "log.jsonl"
+            c1 = Connector(log_path=str(log_file))
+            res1 = c1.process(msg_issue())
+            self.assertEqual(res1.status, "Posted")
+            self.assertEqual(res1.code, "")
+            self.assertEqual(res1.document, "STE-0001")
+
+            c2 = Connector(log_path=str(log_file))
+            res2 = c2.process(msg_issue())
+            self.assertEqual(res2.status, "Posted")
+            self.assertEqual(res2.code, "E-DUP")
+            self.assertEqual(res2.document, "STE-0001")
+            self.assertEqual(res2.message, "Already posted. No second stock entry.")
+            self.assertEqual(len(c2.ledger.entries), 1)
+
+    def test_oserror_in_log_does_not_raise(self):
+        with tempfile.TemporaryDirectory() as temp:
+            log_file = Path(temp) / "log.jsonl"
+            c = Connector(log_path=str(log_file))
+            with mock.patch("builtins.open", side_effect=OSError("Disk full")):
+                res = c.process(msg_issue())
+            self.assertEqual(res.status, "Posted")
+            self.assertEqual(len(c.log), 1)
+            self.assertTrue(getattr(c, "log_file_error", False))
+
+    def test_fragment_without_trailing_newline_fixed_before_append(self):
+        with tempfile.TemporaryDirectory() as temp:
+            log_file = Path(temp) / "log.jsonl"
+            row1 = json.dumps({
+                "ref": "J-100", "work_order": "WO-2401", "kind": "issue",
+                "status": "Posted", "code": "", "document": "STE-0001",
+                "quantities": {}, "attempt_id": "issue",
+            })
+            log_file.write_text(row1, encoding="utf-8")
+
+            c = Connector(log_path=str(log_file))
+            c.process(msg_return())
+
+            c2 = Connector(log_path=str(log_file))
+            self.assertEqual(len(c2.log), 2)
+            self.assertEqual(c2.log[0].ref, "J-100")
+            self.assertEqual(c2.log[1].ref, "R-1")
+
+    def test_non_utf8_byte_in_log_skipped(self):
+        with tempfile.TemporaryDirectory() as temp:
+            log_file = Path(temp) / "log.jsonl"
+            c1 = Connector(log_path=str(log_file))
+            c1.process(msg_issue())
+
+            with open(log_file, "ab") as f:
+                f.write(b"\xff\xfe\xfd\n")
+
+            c2 = Connector(log_path=str(log_file))
+            self.assertEqual(len(c2.log), 1)
+            self.assertEqual(c2.log[0].ref, "J-100")
+
+    def test_invalid_quantities_skipped_without_raising(self):
+        with tempfile.TemporaryDirectory() as temp:
+            log_file = Path(temp) / "log.jsonl"
+            with open(log_file, "w", encoding="utf-8") as f:
+                f.write(json.dumps({"ref": "BAD-1", "work_order": "WO-2401", "kind": "issue", "quantities": "string"}) + "\n")
+                f.write(json.dumps({"ref": "BAD-2", "work_order": "WO-2401", "kind": "issue", "quantities": [1, 2]}) + "\n")
+                f.write(json.dumps({"ref": "BAD-3", "work_order": "WO-2401", "kind": "issue", "quantities": 123}) + "\n")
+                f.write(json.dumps({"ref": "OK-1", "work_order": "WO-2401", "kind": "issue", "status": "Posted", "document": "STE-0001", "quantities": {}}) + "\n")
+
+            c = Connector(log_path=str(log_file))
+            self.assertEqual(len(c.log), 1)
+            self.assertEqual(c.log[0].ref, "OK-1")
+
+    def test_desk_reset_truncates_if_remove_fails(self):
+        with tempfile.TemporaryDirectory() as temp:
+            log_file = Path(temp) / "log.jsonl"
+            desk = Desk(log_path=str(log_file))
+            desk.run("confirm-10")
+            self.assertTrue(log_file.exists())
+            with mock.patch("os.remove", side_effect=OSError("Permission denied")):
+                desk.reset()
+            self.assertTrue(log_file.exists())
+            self.assertEqual(log_file.read_text(encoding="utf-8"), "")
+            self.assertEqual(len(desk.attempts), 1)
+            self.assertEqual(desk.attempts[0]["message"], "Job reset. The message log was cleared.")
+
 
 if __name__ == "__main__":
     unittest.main()
+

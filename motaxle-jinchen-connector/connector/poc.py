@@ -7,7 +7,7 @@ No network call is made. Field names are the POC contract, not a signed API.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
 
@@ -94,6 +94,7 @@ class LogRow:
     code: str
     document: str
     quantities: dict = field(default_factory=dict)
+    attempt_id: str = ""
 
 
 @dataclass
@@ -158,6 +159,8 @@ class Connector:
         if weight:
             self.weight.update(weight)
         self.log_path = log_path
+        if self.log_path:
+            Path(self.log_path).parent.mkdir(parents=True, exist_ok=True)
         self.order_state = {}
         self.order_events = []
         self.ledger = Ledger()
@@ -166,25 +169,57 @@ class Connector:
             p = Path(self.log_path)
             if p.is_file():
                 try:
-                    for line in p.read_text(encoding="utf-8").splitlines():
+                    for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
                         line = line.strip()
                         if not line:
                             continue
                         try:
                             obj = json.loads(line)
-                            if isinstance(obj, dict):
-                                self.log.append(
-                                    LogRow(
-                                        ref=obj.get("ref", ""),
-                                        work_order=obj.get("work_order", ""),
-                                        kind=obj.get("kind", ""),
-                                        status=obj.get("status", ""),
-                                        code=obj.get("code", ""),
-                                        document=obj.get("document", ""),
-                                        quantities=dict(obj.get("quantities") or {}),
+                            if not isinstance(obj, dict):
+                                continue
+                            if "quantities" in obj and obj["quantities"] is not None and not isinstance(obj["quantities"], dict):
+                                continue
+                            q = obj.get("quantities")
+                            row_kwargs = {f.name: obj.get(f.name, "") for f in fields(LogRow)}
+                            row_kwargs["quantities"] = q if isinstance(q, dict) else {}
+                            if not row_kwargs.get("attempt_id") and obj.get("action_id"):
+                                row_kwargs["attempt_id"] = obj["action_id"]
+                            row = LogRow(**row_kwargs)
+                            self.log.append(row)
+                            # Replay Posted stock rows into ledger so that
+                            # ledger.find catches duplicates after a restart.
+                            if (row.status == "Posted" and row.document
+                                    and row.kind in ("issue", "return", "disposition", "receipt")):
+                                self.ledger.entries.append(
+                                    Entry(
+                                        name=row.document,
+                                        kind=row.kind,
+                                        ref=row.ref,
+                                        work_order=row.work_order,
+                                        item="",
+                                        qty=0.0,
+                                        uom="",
+                                        batch="",
+                                        source="",
+                                        target="",
                                     )
                                 )
-                        except (json.JSONDecodeError, UnicodeDecodeError):
+                                try:
+                                    n = int(row.document.split("-")[1])
+                                    if n > self.ledger._n:
+                                        self.ledger._n = n
+                                except (IndexError, ValueError):
+                                    pass
+                            elif row.kind in WORK_ORDER_KINDS and row.status == "Posted":
+                                key = (row.ref, row.work_order, row.kind)
+                                self.order_events.append(key)
+                                if row.kind == "hold":
+                                    self.order_state[row.work_order] = "on hold"
+                                elif row.kind == "cancel":
+                                    self.order_state[row.work_order] = "cancelled"
+                                elif row.kind == "resume":
+                                    self.order_state.pop(row.work_order, None)
+                        except (json.JSONDecodeError, ValueError, TypeError):
                             continue
                 except OSError:
                     pass
@@ -196,32 +231,38 @@ class Connector:
     def _seed(self):
         self.ledger.add(RAW, "ST-20", "H-441", 500.0)
 
-    def _log(self, ref, work_order, kind, status, code, document, drop_log, quantities=None):
+    def _log(self, ref, work_order, kind, status, code, document, drop_log, quantities=None, attempt_id=""):
         if drop_log:
             return
-        row = LogRow(ref, work_order, kind, status, code, document, dict(quantities or {}))
+        if not attempt_id:
+            attempt_id = getattr(self, "_current_attempt_id", "")
+        row = LogRow(ref, work_order, kind, status, code, document, dict(quantities or {}), attempt_id)
         self.log.append(row)
         if self.log_path:
-            Path(self.log_path).parent.mkdir(parents=True, exist_ok=True)
-            row_dict = {
-                "ref": ref,
-                "work_order": work_order,
-                "kind": kind,
-                "status": status,
-                "code": code,
-                "document": document,
-                "quantities": dict(quantities or {}),
-            }
-            with open(self.log_path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(row_dict) + "\n")
+            try:
+                p = Path(self.log_path)
+                if p.exists() and p.stat().st_size > 0:
+                    with open(self.log_path, "rb") as f:
+                        f.seek(-1, 2)
+                        last_byte = f.read(1)
+                    if last_byte != b"\n":
+                        with open(self.log_path, "a", encoding="utf-8") as f:
+                            f.write("\n")
+                with open(self.log_path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(asdict(row)) + "\n")
+            except OSError:
+                self.log_file_error = True
 
     def _done(self, status, code, document, message, ref, work_order, kind, drop_log, quantities=None):
-        self._log(ref, work_order, kind, status, code, document, drop_log, quantities)
+        attempt_id = getattr(self, "_current_attempt_id", "")
+        self._log(ref, work_order, kind, status, code, document, drop_log, quantities, attempt_id=attempt_id)
         return Result(status, code, document, message)
 
-    def process(self, message, drop_log=False):
+    def process(self, message, drop_log=False, attempt_id=""):
+        self._current_attempt_id = attempt_id
         if not isinstance(message, dict):
             # No id to log against. A list, None, or a string is not a message.
+            self._current_attempt_id = ""
             return Result("Business Rejected", "E-ITEM", "", "Unknown message.")
         kind = message.get("kind")
         ref = message.get("id") or ""

@@ -37,7 +37,7 @@ class Desk:
         self.connector = Connector(weight=self.weight, log_path=self.log_path)
         self.attempts = [
             {
-                "id": row.ref,
+                "id": row.attempt_id or row.ref,
                 "status": row.status,
                 "code": row.code,
                 "document": row.document,
@@ -50,22 +50,32 @@ class Desk:
         self.released = False
 
     def reset(self):
+        cleared = True
         if self.log_path and os.path.exists(self.log_path):
             try:
                 os.remove(self.log_path)
             except OSError:
-                pass
+                try:
+                    with open(self.log_path, "w", encoding="utf-8") as f:
+                        pass
+                except OSError:
+                    cleared = False
         self.connector = Connector(weight=self.weight, log_path=self.log_path)
         self.attempts = []
         self.switch_a = False
         self.switch_b = False
         self.released = False
+        msg = (
+            "Job reset. The message log was cleared."
+            if cleared
+            else "Job reset. The message log could not be cleared."
+        )
         self.attempts.append({
             "id": "reset",
             "status": "Posted",
             "code": "",
             "document": "",
-            "message": "Job reset. The message log was cleared.",
+            "message": msg,
         })
 
     def run(self, action_id):
@@ -101,9 +111,10 @@ class Desk:
 
     def apply(self, label, message, drop_log=False):
         kind = (message or {}).get("kind") or ""
+        attempt_id = label or (message or {}).get("id") or kind
         if self.switch_a and kind in ("issue", "return", "disposition", "receipt"):
             row = {
-                "id": label or message.get("id") or kind,
+                "id": attempt_id,
                 "status": "Queued",
                 "code": "",
                 "document": "",
@@ -129,12 +140,12 @@ class Desk:
                 message["completed"] = float(message["completed"])
             except (TypeError, ValueError):
                 message["completed"] = 0
-        result = self.connector.process(message, drop_log=drop_log)
+        result = self.connector.process(message, drop_log=drop_log, attempt_id=attempt_id)
         text = result.message
         if drop_log and not result.code:
             text = text + " The stock entry was saved, then the log write failed."
         row = {
-            "id": label or message.get("id") or kind,
+            "id": attempt_id,
             "status": result.status,
             "code": result.code,
             "document": result.document,
