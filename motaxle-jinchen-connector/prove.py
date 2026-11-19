@@ -258,10 +258,11 @@ def main():
             equal(trace["result"], "found", "B-1 trace result")
             equal(trace["heat"], "H-441", "B-1 trace heat")
             equal(trace["work_order"], "WO-2401", "B-1 trace work order")
+            equal(trace["document"], "STE-0006", "B-1 trace document")
             equal(len(list(done_dir.glob("*.json"))), 9, "done file count")
             equal(len(list(results_dir.glob("*.json"))), 9, "results file count")
 
-    check("12", "nine sample files through read_all match ledger totals and trace", tc12)
+    check("12", "nine sample files reach raw 384, hold 96, finished 0 through read_all.", tc12)
 
     def tc13():
         expected_codes = {
