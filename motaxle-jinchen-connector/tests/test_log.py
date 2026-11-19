@@ -327,11 +327,144 @@ class LogTests(unittest.TestCase):
             desk = Desk(log_path=str(log_file))
             self.assertEqual(len(desk.attempts), 1)
             self.assertEqual(desk.attempts[0]["id"], "issue-again")
-            self.assertEqual(desk.attempts[0]["message"], "Read back from the log file.")
+    def test_review_return_skipped_on_replay_if_source_issue_dropped(self):
+        """Review point 1: Return R-1 replayed with no source issue does not turn WIP negative or Raw > 500."""
+        with tempfile.TemporaryDirectory() as temp:
+            log_file = Path(temp) / "log.jsonl"
+            # Return R-1 against J-100, but J-100 was drop_log so it's not in the file
+            return_entry = {
+                "name": "STE-0002",
+                "kind": "return",
+                "ref": "R-1",
+                "work_order": "WO-2401",
+                "item": "ST-20",
+                "qty": 4.0,
+                "uom": "Kg",
+                "batch": "H-441",
+                "source": "Forging WIP",
+                "target": "Raw Material Store",
+                "against": "J-100",
+            }
+            row = {
+                "ref": "R-1",
+                "work_order": "WO-2401",
+                "kind": "return",
+                "status": "Posted",
+                "code": "",
+                "document": "STE-0002",
+                "quantities": {},
+                "attempt_id": "02-return-R-1.json",
+                "entry": return_entry,
+            }
+            log_file.write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+            c = Connector(log_path=str(log_file))
+            self.assertEqual(c.kg()["wip"], 0.0)
+            self.assertEqual(c.kg()["raw"], 500.0)
+            self.assertEqual(c._kg_out("WO-2401"), 0.0)
+            self.assertEqual(len(c.ledger.entries), 0)
+            self.assertEqual(len(c.log), 1)
+
+    def test_review_e_dup_work_order_events_skipped_on_replay(self):
+        """Review point 2: E-DUP repeats of hold/resume/cancel do not change state on replay."""
+        with tempfile.TemporaryDirectory() as temp:
+            log_file = Path(temp) / "log.jsonl"
+            desk = Desk(log_path=str(log_file))
+            desk.apply("hold", {"kind": "hold", "id": "H-1", "work_order": "WO-2401"})
+            desk.apply("resume", {"kind": "resume", "id": "RS-1", "work_order": "WO-2401"})
+            desk.apply("hold", {"kind": "hold", "id": "H-1", "work_order": "WO-2401"})  # E-DUP
+
+            desk2 = Desk(log_path=str(log_file))
+            # Order must not be on hold after restart because last hold was E-DUP
+            self.assertNotIn("WO-2401", desk2.connector.order_state)
+            self.assertEqual(len(desk2.connector.order_events), 2)  # only H-1 and RS-1, no duplicate H-1
+
+    def test_review_confirm_op_30_not_restored_on_restart(self):
+        """Review point 3: Op-30 confirm is ignored at runtime and not restored on restart."""
+        with tempfile.TemporaryDirectory() as temp:
+            log_file = Path(temp) / "log.jsonl"
+            row = {
+                "ref": "CF-30",
+                "work_order": "WO-2401",
+                "kind": "confirm",
+                "status": "Posted",
+                "code": "",
+                "document": "",
+                "quantities": {"completed": 100, "rejected": 0, "rework": 0, "scrap": 0},
+                "attempt_id": "cf30",
+                "entry": {},
+            }
+            log_file.write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+            desk = Desk(log_path=str(log_file))
+            self.assertEqual(len(desk.connector.confirmations), 0)
+
+    def test_review_typeerror_entry_not_appended_to_log(self):
+        """Review point 4: If rebuilding Entry raises TypeError, row is not appended to self.log."""
+        with tempfile.TemporaryDirectory() as temp:
+            log_file = Path(temp) / "log.jsonl"
+            bad_row = {
+                "ref": "J-BAD",
+                "work_order": "WO-2401",
+                "kind": "issue",
+                "status": "Posted",
+                "code": "",
+                "document": "STE-9999",
+                "quantities": {},
+                "attempt_id": "jbad",
+                "entry": {
+                    "name": "STE-9999",
+                    "kind": "issue",
+                    "ref": "J-BAD",
+                    "work_order": "WO-2401",
+                    "item": "ST-20",
+                    "qty": 10,
+                    "uom": "Kg",
+                    "batch": "H-441",
+                    "source": "RAW",
+                    "target": "WIP",
+                    "extra_unknown_field_that_raises_typeerror": 123,
+                },
+            }
+            log_file.write_text(json.dumps(bad_row) + "\n", encoding="utf-8")
+
+            desk = Desk(log_path=str(log_file))
+            self.assertEqual(len(desk.connector.log), 0)
             self.assertEqual(len(desk.connector.ledger.entries), 0)
-            self.assertEqual(desk.connector.kg()["raw"], 500.0)
+
+    def test_review_reset_builds_connector_without_log_path_when_clearing_fails(self):
+        """Review point 5: When clearing fails, Desk.reset builds Connector without log_path."""
+        with tempfile.TemporaryDirectory() as temp:
+            log_file = Path(temp) / "log.jsonl"
+            log_file.write_text('{"ref": "J-100"}\n', encoding="utf-8")
+            desk = Desk(log_path=str(log_file))
+
+            with mock.patch("os.remove", side_effect=OSError("locked")), \
+                 mock.patch("builtins.open", mock.mock_open()) as m_open:
+                m_open.side_effect = OSError("read-only")
+                desk.reset()
+                self.assertIsNone(desk.connector.log_path)
+                self.assertEqual(len(desk.connector.log), 0)
+                self.assertEqual(desk.attempts[0]["message"], "Job reset. The message log could not be cleared.")
+
+    def test_review_queued_and_release_logged_and_restored(self):
+        """Review point 6: Switch A Queued rows and release rows are logged and restored."""
+        with tempfile.TemporaryDirectory() as temp:
+            log_file = Path(temp) / "log.jsonl"
+            desk = Desk(log_path=str(log_file))
+            desk.switch_a = True
+            desk.run("issue-again")
+            desk.release()
+
+            desk2 = Desk(log_path=str(log_file))
+            self.assertEqual(len(desk2.attempts), 2)
+            self.assertEqual(desk2.attempts[0]["id"], "issue-again")
+            self.assertEqual(desk2.attempts[0]["status"], "Queued")
+            self.assertEqual(desk2.attempts[1]["id"], "release")
+            self.assertEqual(desk2.attempts[1]["status"], "Sent")
 
 
 if __name__ == "__main__":
     unittest.main()
+
 

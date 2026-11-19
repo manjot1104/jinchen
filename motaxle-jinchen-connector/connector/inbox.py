@@ -129,12 +129,31 @@ def read_next(
             "message": QUEUED_MESSAGE,
         }
         move_to_done = False
+        if hasattr(connector, "_log"):
+            connector._log(
+                message.get("id") or "",
+                message.get("work_order") or "",
+                message.get("kind") or "",
+                "Queued",
+                "",
+                "",
+                drop_log=False,
+                quantities=None,
+                attempt_id=source.name,
+            )
     else:
         try:
-            result = connector.process(
-                message,
-                drop_log="log-fails" in source.name,
-            )
+            try:
+                result = connector.process(
+                    message,
+                    drop_log="log-fails" in source.name,
+                    attempt_id=source.name,
+                )
+            except TypeError:
+                result = connector.process(
+                    message,
+                    drop_log="log-fails" in source.name,
+                )
         except Exception:  # the last guard: the next file must still be read
             result = None
 

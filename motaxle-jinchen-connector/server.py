@@ -14,7 +14,7 @@ from urllib.parse import unquote
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from connector.poc import ConfigError, Connector
+from connector.poc import ConfigError, Connector, LOG_FILE_ERROR_MESSAGE
 from connector.inbox import copy_samples, list_inbox, load_config, read_all
 
 HOST = "127.0.0.1"
@@ -60,7 +60,8 @@ class Desk:
                         pass
                 except OSError:
                     cleared = False
-        self.connector = Connector(weight=self.weight, log_path=self.log_path)
+        path_to_use = self.log_path if cleared else None
+        self.connector = Connector(weight=self.weight, log_path=path_to_use)
         self.attempts = []
         self.switch_a = False
         self.switch_b = False
@@ -102,11 +103,15 @@ class Desk:
             last_result = row
 
         payload = self.payload(last_result)
-        payload["inbox_message"] = (
+        inbox_msg = (
             f"Read {len(results)} inbox file(s)."
             if results
             else "Inbox is empty."
         )
+        if getattr(self.connector, "log_file_error", False):
+            inbox_msg = inbox_msg + " " + LOG_FILE_ERROR_MESSAGE
+            self.connector.log_file_error = False
+        payload["inbox_message"] = inbox_msg
         return payload
 
     def apply(self, label, message, drop_log=False):
@@ -120,6 +125,17 @@ class Desk:
                 "document": "",
                 "message": "Switch A is on. Logged only. Stock was not posted. Turning Switch A off does not post the queue.",
             }
+            self.connector._log(
+                (message or {}).get("id") or attempt_id,
+                (message or {}).get("work_order") or "",
+                kind,
+                "Queued",
+                "",
+                "",
+                drop_log=False,
+                quantities=None,
+                attempt_id=attempt_id,
+            )
             self.attempts.append(row)
             return row
         # Work on a copy. For a catalog button, message is ACTIONS[...]["message"],
@@ -142,11 +158,11 @@ class Desk:
                 message["completed"] = 0
         result = self.connector.process(message, drop_log=drop_log, attempt_id=attempt_id)
         text = result.message
-        if getattr(self.connector, "log_file_error", False):
-            text = text + " The log file could not be written."
-            self.connector.log_file_error = False
-        elif drop_log and not result.code:
+        if drop_log and not result.code:
             text = text + " The stock entry was saved, then the log write failed."
+        if getattr(self.connector, "log_file_error", False):
+            text = text + " " + LOG_FILE_ERROR_MESSAGE
+            self.connector.log_file_error = False
         row = {
             "id": attempt_id,
             "status": result.status,
@@ -193,6 +209,17 @@ class Desk:
                 "document": "",
                 "message": "WO-2401 release was recorded on this desk. Jinchen was not called.",
             }
+        self.connector._log(
+            "WO-2401",
+            "WO-2401",
+            "release",
+            row["status"],
+            row["code"],
+            row["document"],
+            drop_log=False,
+            quantities=None,
+            attempt_id="release",
+        )
         self.attempts.append(row)
         return row
 

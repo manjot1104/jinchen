@@ -7,6 +7,7 @@ No network call is made. Field names are the POC contract, not a signed API.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
@@ -172,6 +173,7 @@ class Connector:
         self.confirmations = []
         self.output_batches = {}
         self.inspection_required = True
+        self.log_file_error = False
         self._seed()
         self._load_log()
 
@@ -185,6 +187,14 @@ class Connector:
         if not p.is_file():
             return
         try:
+            if p.stat().st_size > 0:
+                with open(self.log_path, "rb") as f:
+                    f.seek(-1, os.SEEK_END)
+                    last_byte = f.read(1)
+                if last_byte != b"\n":
+                    with open(self.log_path, "a", encoding="utf-8") as f:
+                        f.write("\n")
+
             for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
                 line = line.strip()
                 if not line:
@@ -199,42 +209,53 @@ class Connector:
                     row_kwargs = {f.name: obj.get(f.name, "") for f in fields(LogRow)}
                     row_kwargs["quantities"] = q if isinstance(q, dict) else {}
                     row_kwargs["entry"] = obj.get("entry") if isinstance(obj.get("entry"), dict) else {}
-                    row = LogRow(**row_kwargs)
-                    self.log.append(row)
 
-                    if row.status == "Posted" and row.entry:
-                        entry_data = dict(row.entry)
+                    entry = None
+                    if row_kwargs["status"] == "Posted" and row_kwargs.get("entry"):
+                        entry_data = dict(row_kwargs["entry"])
                         entry_data.pop("operation", None)
                         if "name" in entry_data and "kind" in entry_data:
                             entry = Entry(**entry_data)
-                            self.ledger.entries.append(entry)
-                            if entry.source:
-                                self.ledger.add(entry.source, entry.item, entry.batch, -entry.qty)
-                            if entry.target:
-                                self.ledger.add(entry.target, entry.item, entry.batch, entry.qty)
-                            try:
-                                n = int(entry.name.split("-")[1])
-                                if n > self.ledger._n:
-                                    self.ledger._n = n
-                            except (IndexError, ValueError):
-                                pass
-                            if entry.kind == "receipt" and entry.batch:
-                                self.output_batches[entry.batch] = (entry.work_order, entry.name)
+
+                    row = LogRow(**row_kwargs)
+                    self.log.append(row)
+
+                    if row.code == "E-DUP":
+                        continue
+
+                    if row.status == "Posted" and entry is not None:
+                        if entry.kind == "return":
+                            has_source = any(
+                                e.kind == "issue" and e.work_order == entry.work_order and e.ref == entry.against
+                                for e in self.ledger.entries
+                            )
+                            if not has_source:
+                                continue
+
+                        self.ledger.entries.append(entry)
+                        if entry.source:
+                            self.ledger.add(entry.source, entry.item, entry.batch, -entry.qty)
+                        if entry.target:
+                            self.ledger.add(entry.target, entry.item, entry.batch, entry.qty)
+                        try:
+                            n = int(entry.name.split("-")[1])
+                            if n > self.ledger._n:
+                                self.ledger._n = n
+                        except (IndexError, ValueError):
+                            pass
+                        if entry.kind == "receipt" and entry.batch:
+                            self.output_batches[entry.batch] = (entry.work_order, entry.name)
 
                     if row.status == "Posted" and row.kind == "confirm":
                         operation = row.entry.get("operation")
-                        if operation is None:
-                            try:
-                                operation = int(row.ref.split("-")[1])
-                            except (IndexError, ValueError):
-                                operation = 0
-                        numbers = (
-                            float(row.quantities.get("completed", 0.0)),
-                            float(row.quantities.get("rejected", 0.0)),
-                            float(row.quantities.get("rework", 0.0)),
-                            float(row.quantities.get("scrap", 0.0)),
-                        )
-                        self.confirmations.append((row.work_order, operation, numbers))
+                        if operation is not None and operation in (10, 20):
+                            numbers = (
+                                float(row.quantities.get("completed", 0.0)),
+                                float(row.quantities.get("rejected", 0.0)),
+                                float(row.quantities.get("rework", 0.0)),
+                                float(row.quantities.get("scrap", 0.0)),
+                            )
+                            self.confirmations.append((row.work_order, int(operation), numbers))
 
                     elif row.status == "Posted" and row.kind in WORK_ORDER_KINDS:
                         key = (row.ref, row.work_order, row.kind)
@@ -257,14 +278,6 @@ class Connector:
         self.log.append(row)
         if self.log_path:
             try:
-                p = Path(self.log_path)
-                if p.exists() and p.stat().st_size > 0:
-                    with open(self.log_path, "rb") as f:
-                        f.seek(-1, 2)
-                        last_byte = f.read(1)
-                    if last_byte != b"\n":
-                        with open(self.log_path, "a", encoding="utf-8") as f:
-                            f.write("\n")
                 with open(self.log_path, "a", encoding="utf-8") as f:
                     f.write(json.dumps(asdict(row)) + "\n")
             except OSError:
@@ -275,6 +288,7 @@ class Connector:
         return Result(status, code, document, message)
 
     def process(self, message, drop_log=False, attempt_id=""):
+        self.log_file_error = False
         if not isinstance(message, dict):
             # No id to log against. A list, None, or a string is not a message.
             return Result("Business Rejected", "E-ITEM", "", "Unknown message.")
