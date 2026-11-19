@@ -8,6 +8,7 @@ from pathlib import Path
 from connector.inbox import read_all
 from connector.poc import Connector
 from connector.reconcile import reconcile
+from tests.test_stand_in_rules import confirm, give_back, issue, order, with_metal
 
 PROJECT = Path(__file__).resolve().parent.parent
 SAMPLES = PROJECT / "inbox" / "samples"
@@ -19,19 +20,9 @@ class ConfirmRepeatTests(unittest.TestCase):
         Already confirmed. Not stored again.
         """
         c = Connector()
-        c.process({
-            "kind": "issue", "id": "J-100", "work_order": "WO-2401",
-            "item": "ST-20", "qty": 120, "uom": "Kg", "batch": "H-441",
-            "from_warehouse": "Raw Material Store", "to_warehouse": "Forging WIP",
-        })
-        first = c.process({
-            "kind": "confirm", "id": "CF-10", "work_order": "WO-2401",
-            "operation": 10, "completed": 100, "rejected": 0, "rework": 0, "scrap": 0,
-        })
-        second = c.process({
-            "kind": "confirm", "id": "CF-10", "work_order": "WO-2401",
-            "operation": 10, "completed": 100, "rejected": 0, "rework": 0, "scrap": 0,
-        })
+        c.process(issue())
+        first = c.process(confirm())
+        second = c.process(confirm())
         self.assertEqual(first.status, "Posted")
         self.assertEqual(first.code, "")
         self.assertEqual(second.status, "Posted")
@@ -42,38 +33,18 @@ class ConfirmRepeatTests(unittest.TestCase):
     def test_criterion_1_repeated_confirm_does_not_add_to_confirmations_list(self):
         """Criterion 1: confirmations has 1 row after CF-10 sent twice."""
         c = Connector()
-        c.process({
-            "kind": "issue", "id": "J-100", "work_order": "WO-2401",
-            "item": "ST-20", "qty": 120, "uom": "Kg", "batch": "H-441",
-            "from_warehouse": "Raw Material Store", "to_warehouse": "Forging WIP",
-        })
-        c.process({
-            "kind": "confirm", "id": "CF-10", "work_order": "WO-2401",
-            "operation": 10, "completed": 100, "rejected": 0, "rework": 0, "scrap": 0,
-        })
-        c.process({
-            "kind": "confirm", "id": "CF-10", "work_order": "WO-2401",
-            "operation": 10, "completed": 100, "rejected": 0, "rework": 0, "scrap": 0,
-        })
+        c.process(issue())
+        c.process(confirm())
+        c.process(confirm())
         self.assertEqual(len(c.confirmations), 1)
         self.assertEqual(c.confirmations[0], ("WO-2401", 10, (100.0, 0.0, 0.0, 0.0)))
 
     def test_criterion_1_repeated_confirm_logs_both_attempts(self):
         """Criterion 1: the log has 2 rows for confirmations."""
         c = Connector()
-        c.process({
-            "kind": "issue", "id": "J-100", "work_order": "WO-2401",
-            "item": "ST-20", "qty": 120, "uom": "Kg", "batch": "H-441",
-            "from_warehouse": "Raw Material Store", "to_warehouse": "Forging WIP",
-        })
-        c.process({
-            "kind": "confirm", "id": "CF-10", "work_order": "WO-2401",
-            "operation": 10, "completed": 100, "rejected": 0, "rework": 0, "scrap": 0,
-        })
-        c.process({
-            "kind": "confirm", "id": "CF-10", "work_order": "WO-2401",
-            "operation": 10, "completed": 100, "rejected": 0, "rework": 0, "scrap": 0,
-        })
+        c.process(issue())
+        c.process(confirm())
+        c.process(confirm())
         confirm_logs = [row for row in c.log if row.kind == "confirm"]
         self.assertEqual(len(confirm_logs), 2)
         self.assertEqual(confirm_logs[0].code, "")
@@ -82,19 +53,9 @@ class ConfirmRepeatTests(unittest.TestCase):
     def test_criterion_2_same_id_with_different_operation_still_posts(self):
         """Criterion 2: The key is id + work order + operation: CF-10 with operation 20 still posts."""
         c = Connector()
-        c.process({
-            "kind": "issue", "id": "J-100", "work_order": "WO-2401",
-            "item": "ST-20", "qty": 120, "uom": "Kg", "batch": "H-441",
-            "from_warehouse": "Raw Material Store", "to_warehouse": "Forging WIP",
-        })
-        first = c.process({
-            "kind": "confirm", "id": "CF-10", "work_order": "WO-2401",
-            "operation": 10, "completed": 100, "rejected": 0, "rework": 0, "scrap": 0,
-        })
-        second = c.process({
-            "kind": "confirm", "id": "CF-10", "work_order": "WO-2401",
-            "operation": 20, "completed": 100, "rejected": 0, "rework": 0, "scrap": 0,
-        })
+        c.process(issue())
+        first = c.process(confirm("CF-10", operation=10))
+        second = c.process(confirm("CF-10", operation=20))
         self.assertEqual(first.status, "Posted")
         self.assertEqual(first.code, "")
         self.assertEqual(second.status, "Posted")
@@ -106,24 +67,14 @@ class ConfirmRepeatTests(unittest.TestCase):
         then J-100, then CF-10 posts.
         """
         c = Connector()
-        refused = c.process({
-            "kind": "confirm", "id": "CF-10", "work_order": "WO-2401",
-            "operation": 10, "completed": 100, "rejected": 0, "rework": 0, "scrap": 0,
-        })
+        refused = c.process(confirm())
         self.assertEqual(refused.status, "Business Rejected")
         self.assertEqual(refused.code, "E-QTY")
         self.assertEqual(len(c.confirmations), 0)
         self.assertNotIn(("CF-10", "WO-2401", 10), c.confirm_keys)
 
-        c.process({
-            "kind": "issue", "id": "J-100", "work_order": "WO-2401",
-            "item": "ST-20", "qty": 120, "uom": "Kg", "batch": "H-441",
-            "from_warehouse": "Raw Material Store", "to_warehouse": "Forging WIP",
-        })
-        posted = c.process({
-            "kind": "confirm", "id": "CF-10", "work_order": "WO-2401",
-            "operation": 10, "completed": 100, "rejected": 0, "rework": 0, "scrap": 0,
-        })
+        c.process(issue())
+        posted = c.process(confirm())
         self.assertEqual(posted.status, "Posted")
         self.assertEqual(posted.code, "")
         self.assertEqual(len(c.confirmations), 1)
@@ -181,16 +132,70 @@ class ConfirmRepeatTests(unittest.TestCase):
     def test_operation_30_stays_ignored_and_adds_no_key(self):
         """Operation 30 stays ignored and adds no key."""
         c = Connector()
-        res = c.process({
-            "kind": "confirm", "id": "CF-30", "work_order": "WO-2401",
-            "operation": 30, "completed": 100, "rejected": 0, "rework": 0, "scrap": 0,
-        })
+        res = c.process(confirm("CF-30", operation=30))
         self.assertEqual(res.status, "Posted")
         self.assertEqual(res.code, "")
         self.assertEqual(res.message, "Operation 30 is vendor work and is ignored.")
         self.assertEqual(len(c.confirmations), 0)
         self.assertEqual(len(c.confirm_keys), 0)
 
+    def test_replay_after_full_return_gives_e_dup(self):
+        """Review case 1: After full return (R-ALL), replayed CF-10 returns Posted E-DUP, not E-QTY."""
+        c = with_metal()
+        first = c.process(confirm("CF-10", operation=10, completed=100))
+        self.assertEqual(first.status, "Posted")
+        self.assertEqual(len(c.confirmations), 1)
+
+        ret = c.process(give_back("R-ALL", 120))
+        self.assertEqual(ret.status, "Posted")
+        self.assertEqual(c._kg_out("WO-2401"), 0.0)
+
+        replay = c.process(confirm("CF-10", operation=10, completed=100))
+        self.assertEqual(replay.status, "Posted")
+        self.assertEqual(replay.code, "E-DUP")
+        self.assertEqual(replay.document, "")
+        self.assertEqual(replay.message, "Already confirmed. Not stored again.")
+        self.assertEqual(len(c.confirmations), 1)
+
+    def test_replay_while_order_on_hold_gives_e_dup(self):
+        """Review case 2: On hold (H-1), replayed CF-10 returns Posted E-DUP, not E-CLOSED."""
+        c = with_metal()
+        first = c.process(confirm("CF-10", operation=10, completed=100))
+        self.assertEqual(first.status, "Posted")
+        self.assertEqual(len(c.confirmations), 1)
+
+        held = c.process(order("hold", "H-1"))
+        self.assertEqual(held.status, "Posted")
+        self.assertEqual(c.order_state.get("WO-2401"), "on hold")
+
+        replay = c.process(confirm("CF-10", operation=10, completed=100))
+        self.assertEqual(replay.status, "Posted")
+        self.assertEqual(replay.code, "E-DUP")
+        self.assertEqual(replay.document, "")
+        self.assertEqual(replay.message, "Already confirmed. Not stored again.")
+        self.assertEqual(len(c.confirmations), 1)
+
+    def test_repeat_with_different_quantities_logs_stored_quantities(self):
+        """Review case 3: Repeat with same key but different quantities returns E-DUP and logs stored quantities."""
+        c = with_metal()
+        first = c.process(confirm("CF-10", operation=10, completed=100, rejected=0, rework=0, scrap=0))
+        self.assertEqual(first.status, "Posted")
+
+        # Repeat with changed quantities
+        repeat = c.process(confirm("CF-10", operation=10, completed=50, rejected=10, rework=0, scrap=0))
+        self.assertEqual(repeat.status, "Posted")
+        self.assertEqual(repeat.code, "E-DUP")
+        self.assertEqual(repeat.message, "Already confirmed. Not stored again.")
+        self.assertEqual(len(c.confirmations), 1)
+        self.assertEqual(c.confirmations[0], ("WO-2401", 10, (100.0, 0.0, 0.0, 0.0)))
+
+        confirm_logs = [row for row in c.log if row.kind == "confirm"]
+        self.assertEqual(len(confirm_logs), 2)
+        self.assertEqual(confirm_logs[0].quantities, {"completed": 100.0, "rejected": 0.0, "rework": 0.0, "scrap": 0.0})
+        # The repeated log row must record stored quantities (100, 0, 0, 0), not incoming (50, 10, 0, 0)
+        self.assertEqual(confirm_logs[1].quantities, {"completed": 100.0, "rejected": 0.0, "rework": 0.0, "scrap": 0.0})
+
 
 if __name__ == "__main__":
     unittest.main()
+

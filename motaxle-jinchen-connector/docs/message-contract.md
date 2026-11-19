@@ -10,7 +10,7 @@ Eleven codes. E-CLOSED was added on 18 November 2026 (US-082, decision D-7 in [d
 
 | Code | Meaning |
 |---|---|
-| E-DUP | The same id, work order and kind was already applied. Status stays Posted and the first document is returned. |
+| E-DUP | The same id, work order and kind was already applied. Status stays Posted and the first document is returned. For confirmations, the repeat key is id + work_order + operation, the document is empty, and a repeated confirmation logs the original stored quantities. |
 | E-ITEM | Wrong or missing item, unknown kind, or a return against an issue that was not posted. |
 | E-UOM | Wrong unit. |
 | E-WH | Wrong warehouse on an issue. |
@@ -27,7 +27,7 @@ Eleven codes. E-CLOSED was added on 18 November 2026 (US-082, decision D-7 in [d
 | Field | Type | Required | Allowed values | When wrong |
 |---|---|---|---|---|
 | kind | string | yes | issue, return, confirm, disposition, receipt, hold, resume, cancel | E-ITEM *Unknown message.* |
-| id | string | yes | any; the repeat key is id + work_order + kind | E-QTY *Id and work order are required.* |
+| id | string | yes | any; the repeat key is id + work_order + kind (for confirmations, id + work_order + operation) | E-QTY *Id and work order are required.* |
 | work_order | string | yes | WO-2401 in the samples | E-QTY *Id and work order are required.*; E-CLOSED when the order is on hold or cancelled |
 
 ## issue (sample 01)
@@ -64,11 +64,12 @@ Eleven codes. E-CLOSED was added on 18 November 2026 (US-082, decision D-7 in [d
 
 Checks across the fields, in this order:
 
-1. completed + rejected + rework + scrap is not above the order of 100: E-QTY *Completed pieces are above the order.* (US-079)
-2. Steel is out on this work order (issued minus returned above 0): E-QTY *No metal was issued on this work order.* (US-080)
-3. The pieces × kg_per_piece is not above the steel out × (1 + loss_allowance), both from `config.json`: E-QTY *Pieces need more steel than was issued.* (US-081)
+1. A repeated confirmation (same id, work order and operation) returns Posted with E-DUP *Already confirmed. Not stored again.* and an empty document, logging the stored quantities. This repeat check runs first, before the closed-state check (E-CLOSED) and validation checks.
+2. completed + rejected + rework + scrap is not above the order of 100: E-QTY *Completed pieces are above the order.* (US-079)
+3. Steel is out on this work order (issued minus returned above 0): E-QTY *No metal was issued on this work order.* (US-080)
+4. The pieces × kg_per_piece is not above the steel out × (1 + loss_allowance), both from `config.json`: E-QTY *Pieces need more steel than was issued.* (US-081)
 
-A confirmation never creates a stock entry. The four quantities are stored separately on the log row. A repeated confirmation (same id, work order and operation) returns E-DUP *Already confirmed. Not stored again.* and is not stored.
+A confirmation never creates a stock entry. The four quantities are stored separately on the log row.
 
 ## disposition (samples 05, 06 and 07)
 

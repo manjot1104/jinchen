@@ -102,6 +102,35 @@ class Result:
     message: str
 
 
+class Confirmation(tuple):
+    """Stored confirmation: (work_order, operation, numbers, ref).
+    Maintains 3-tuple compatibility for (work_order, operation, numbers)
+    while storing ref on the tuple.
+    """
+
+    def __new__(cls, work_order, operation, numbers, ref=""):
+        obj = super().__new__(cls, (work_order, operation, tuple(numbers)))
+        obj.ref = ref
+        return obj
+
+    def __getitem__(self, item):
+        if item == 3:
+            return self.ref
+        return super().__getitem__(item)
+
+    @property
+    def work_order(self):
+        return self[0]
+
+    @property
+    def operation(self):
+        return self[1]
+
+    @property
+    def numbers(self):
+        return self[2]
+
+
 @dataclass
 class Ledger:
     bins: dict = field(default_factory=dict)
@@ -160,10 +189,16 @@ class Connector:
         self.ledger = Ledger()
         self.log = []
         self.confirmations = []
-        self.confirm_keys = set()
         self.output_batches = {}
         self.inspection_required = True
         self._seed()
+
+    @property
+    def confirm_keys(self):
+        return {
+            (getattr(c, "ref", c[3] if len(c) > 3 else ""), c[0], c[1])
+            for c in self.confirmations
+        }
 
     def _seed(self):
         self.ledger.add(RAW, "ST-20", "H-441", 500.0)
@@ -189,6 +224,21 @@ class Connector:
         existing = self.ledger.find(ref, work_order, kind)
         if existing and kind in ("issue", "return", "disposition", "receipt"):
             return self._done("Posted", "E-DUP", existing.name, "Already posted. No second stock entry.", ref, work_order, kind, drop_log)
+        if kind == "confirm":
+            operation = message.get("operation")
+            try:
+                op_int = int(operation) if operation is not None else 0
+            except (ValueError, TypeError):
+                op_int = 0
+            existing_confirm = next(
+                (c for c in self.confirmations
+                 if (getattr(c, "ref", None) == ref or (len(c) > 3 and c[3] == ref))
+                 and c[0] == work_order and c[1] == op_int),
+                None,
+            )
+            if existing_confirm:
+                stored_q = dict(zip(("completed", "rejected", "rework", "scrap"), existing_confirm[2]))
+                return self._done("Posted", "E-DUP", "", "Already confirmed. Not stored again.", ref, work_order, "confirm", drop_log, quantities=stored_q)
         if kind in WORK_ORDER_KINDS:
             return self._work_order(message, kind, drop_log)
         state = self.order_state.get(work_order)
@@ -307,11 +357,7 @@ class Connector:
         if needed > allowed + 1e-9:
             return self._done("Business Rejected", "E-QTY", "", "Pieces need more steel than was issued.", ref, work_order, "confirm", drop_log)
         quantities = dict(zip(("completed", "rejected", "rework", "scrap"), numbers))
-        key = (ref, work_order, operation)
-        if key in self.confirm_keys:
-            return self._done("Posted", "E-DUP", "", "Already confirmed. Not stored again.", ref, work_order, "confirm", drop_log, quantities)
-        self.confirm_keys.add(key)
-        self.confirmations.append((work_order, operation, tuple(numbers)))
+        self.confirmations.append(Confirmation(work_order, operation, tuple(numbers), ref=ref))
         return self._done("Posted", "", "", "Confirmation stored. Finished goods unchanged.", ref, work_order, "confirm", drop_log, quantities)
 
     def _kg_out(self, work_order):
