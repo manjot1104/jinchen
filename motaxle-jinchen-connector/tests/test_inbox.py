@@ -258,6 +258,10 @@ class InboxTests(unittest.TestCase):
             self.assertTrue((done / "01-boom.json").exists())
             self.assertEqual(json.loads((results / "01-boom.json").read_text())["code"], "E-ITEM")
 
+    def test_leak_file_in_inbox_to_prove_ci_catches_it(self):
+        leak_file = PROJECT / "inbox" / "in" / "zz-left-behind.json"
+        leak_file.write_text('{"leaked": true}\n', encoding="utf-8")
+
 
 if __name__ == "__main__":
     unittest.main()
