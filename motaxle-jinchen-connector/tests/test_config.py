@@ -155,6 +155,44 @@ class ConfigTests(unittest.TestCase):
         lines = [call.args[0] for call in printed.call_args_list if call.args]
         self.assertEqual(lines, [MODE_SENTENCE])
 
+    def test_prove_main_loads_config_once_and_propagates_it(self):
+        import prove
+        real_load = load_config
+        real_read_all = read_all
+        configs_passed = []
+
+        def spy_read_all(*args, **kwargs):
+            configs_passed.append(kwargs.get("config"))
+            return real_read_all(*args, **kwargs)
+
+        with mock.patch.object(prove, "load_config", wraps=real_load) as mocked_load, \
+             mock.patch.object(prove, "read_all", side_effect=spy_read_all), \
+             mock.patch("builtins.print"):
+            prove.main()
+
+        self.assertEqual(mocked_load.call_count, 1)
+        self.assertEqual(len(configs_passed), 2)
+        for cfg in configs_passed:
+            self.assertIsNotNone(cfg)
+            self.assertEqual(cfg["mode"], "test")
+
+    def test_prove_run_folder_isolates_samples_and_examples(self):
+        import prove
+        with prove.run_folder(PROJECT / "inbox" / "samples") as (connector, results, results_dir):
+            self.assertEqual(len(results), 9)
+            self.assertEqual(connector.kg(), {"raw": 384.0, "wip": 116.0})
+            self.assertEqual(len(list(results_dir.glob("*.json"))), 9)
+        with prove.run_folder(PROJECT / "inbox" / "examples") as (connector, results, results_dir):
+            self.assertEqual(len(results), 8)
+            self.assertEqual(connector.kg(), {"raw": 500.0, "wip": 0.0})
+            self.assertEqual(len(connector.ledger.entries), 0)
+            self.assertEqual(connector.ledger.capa, 0)
+
+    def test_prove_completion_does_not_depend_on_hardcoded_count(self):
+        source = (PROJECT / "prove.py").read_text(encoding="utf-8")
+        self.assertNotIn("passed == 12", source)
+        self.assertNotIn("passed == 10", source)
+
 
 if __name__ == "__main__":
     unittest.main()

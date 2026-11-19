@@ -258,6 +258,46 @@ class InboxTests(unittest.TestCase):
             self.assertTrue((done / "01-boom.json").exists())
             self.assertEqual(json.loads((results / "01-boom.json").read_text())["code"], "E-ITEM")
 
+    def test_destination_collision_preserves_existing_done_and_result_files(self):
+        with tempfile.TemporaryDirectory() as temp:
+            inbox, done, results = temp_inbox(Path(temp))
+            done.mkdir()
+            results.mkdir()
+            (done / ISSUE_FILE).write_text("original-done", encoding="utf-8")
+            (results / ISSUE_FILE).write_text("original-result", encoding="utf-8")
+            shutil.copy2(SAMPLES / ISSUE_FILE, inbox / ISSUE_FILE)
+            connector = Connector()
+
+            outcome = read_next(
+                connector, inbox_dir=inbox, done_dir=done, results_dir=results
+            )
+
+            self.assertEqual(outcome["status"], "Posted")
+            self.assertEqual(outcome["document"], "STE-0001")
+            self.assertFalse((inbox / ISSUE_FILE).exists())
+            self.assertEqual((done / ISSUE_FILE).read_text(encoding="utf-8"), "original-done")
+            self.assertEqual((results / ISSUE_FILE).read_text(encoding="utf-8"), "original-result")
+            self.assertTrue((done / "01-issue-J-100-log-fails-1.json").exists())
+            collided_result = json.loads(
+                (results / "01-issue-J-100-log-fails-1.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(collided_result["status"], "Posted")
+            self.assertEqual(collided_result["document"], "STE-0001")
+
+    def test_non_collision_preserves_original_filename(self):
+        with tempfile.TemporaryDirectory() as temp:
+            inbox, done, results = temp_inbox(Path(temp))
+            shutil.copy2(SAMPLES / ISSUE_FILE, inbox / ISSUE_FILE)
+
+            outcome = read_next(
+                Connector(), inbox_dir=inbox, done_dir=done, results_dir=results
+            )
+
+            self.assertEqual(outcome["status"], "Posted")
+            self.assertTrue((done / ISSUE_FILE).exists())
+            self.assertTrue((results / ISSUE_FILE).exists())
+            self.assertFalse((done / "01-issue-J-100-log-fails-1.json").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

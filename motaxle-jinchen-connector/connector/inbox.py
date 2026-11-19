@@ -83,6 +83,21 @@ def list_inbox(inbox_dir=None):
     )
 
 
+def _unique_target(directory, filename):
+    """Return directory / filename, or add a numeric suffix if it already exists."""
+    target = directory / filename
+    if not target.exists():
+        return target
+    stem = target.stem
+    suffix = target.suffix
+    counter = 1
+    while True:
+        candidate = directory / f"{stem}-{counter}{suffix}"
+        if not candidate.exists():
+            return candidate
+        counter += 1
+
+
 def read_next(
     connector,
     inbox_dir=None,
@@ -156,14 +171,15 @@ def read_next(
     done_directory.mkdir(parents=True, exist_ok=True)
     results_directory.mkdir(parents=True, exist_ok=True)
 
-    result_file = results_directory / source.name
+    result_file = _unique_target(results_directory, source.name)
     result_file.write_text(
         json.dumps(result_data, indent=2) + "\n",
         encoding="utf-8",
     )
 
     if move_to_done:
-        source.replace(done_directory / source.name)
+        done_target = _unique_target(done_directory, source.name)
+        source.rename(done_target)
 
     return result_data
 
@@ -175,13 +191,15 @@ def read_all(
     done_dir=None,
     results_dir=None,
     config_path=None,
+    config=None,
 ):
     """Read the current inbox in filename order, respecting Switch A.
 
     The config is checked before the first file is touched. A filled live
     password or a bad mode raises ConfigError and nothing moves.
     """
-    load_config(config_path)
+    if config is None:
+        load_config(config_path)
     files = list_inbox(inbox_dir)
     results = []
 

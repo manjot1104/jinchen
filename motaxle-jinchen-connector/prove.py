@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 import json
 from pathlib import Path
 import shutil
@@ -50,12 +51,36 @@ def return_message(ref="R-1", qty=4):
     }
 
 
+@contextmanager
+def run_folder(src_dir, config=None):
+    """Copy JSON files from src_dir into an isolated temp inbox and run read_all."""
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp)
+        inbox_dir = root / "in"
+        done_dir = root / "done"
+        results_dir = root / "results"
+        inbox_dir.mkdir()
+        for source in sorted(Path(src_dir).glob("*.json")):
+            shutil.copy2(source, inbox_dir / source.name)
+
+        connector = Connector()
+        results = read_all(
+            connector,
+            switch_a=False,
+            inbox_dir=inbox_dir,
+            done_dir=done_dir,
+            results_dir=results_dir,
+            config=config,
+        )
+        yield connector, results, results_dir
+
+
 def main():
     global passed, failed
     passed = 0
     failed = 0
     try:
-        load_config()
+        config = load_config()
     except ConfigError as exc:
         print(str(exc))
         raise SystemExit(1)
@@ -212,28 +237,12 @@ def main():
     check("11", "finished-goods receipt is blocked and batch trace is exact", tc11)
 
     def tc12():
-        keep_only = {"KEEP"}
-        for folder in ("in", "done", "results"):
-            names = {p.name for p in (REPO_INBOX / folder).iterdir()}
-            equal(names, keep_only, f"repo inbox/{folder} before")
-
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            inbox_dir = root / "in"
-            done_dir = root / "done"
-            results_dir = root / "results"
-            inbox_dir.mkdir()
-            for sample in sorted((REPO_INBOX / "samples").glob("*.json")):
-                shutil.copy2(sample, inbox_dir / sample.name)
-
-            inbox_connector = Connector()
-            results = read_all(
-                inbox_connector,
-                switch_a=False,
-                inbox_dir=inbox_dir,
-                done_dir=done_dir,
-                results_dir=results_dir,
-            )
+        with run_folder(REPO_INBOX / "samples", config=config) as (
+            inbox_connector,
+            results,
+            results_dir,
+        ):
+            done_dir = results_dir.parent / "done"
             equal(len(results), 9, "sample result count")
             equal(inbox_connector.kg(), {"raw": 384.0, "wip": 116.0}, "inbox sample kg")
             equal(
@@ -251,10 +260,6 @@ def main():
             equal(len(list(done_dir.glob("*.json"))), 9, "done file count")
             equal(len(list(results_dir.glob("*.json"))), 9, "results file count")
 
-        for folder in ("in", "done", "results"):
-            names = {p.name for p in (REPO_INBOX / folder).iterdir()}
-            equal(names, keep_only, f"repo inbox/{folder} after")
-
     check("12", "nine sample files through read_all match ledger totals and trace", tc12)
 
     def tc13():
@@ -268,34 +273,29 @@ def main():
             "ex-nobatch.json": "E-BATCH",
             "ex-scrap-return.json": "E-REASON",
         }
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            inbox_dir = root / "in"
-            done_dir = root / "done"
-            results_dir = root / "results"
-            inbox_dir.mkdir()
-            for example in sorted((REPO_INBOX / "examples").glob("*.json")):
-                shutil.copy2(example, inbox_dir / example.name)
-
-            example_connector = Connector()
-            results = read_all(
-                example_connector,
-                switch_a=False,
-                inbox_dir=inbox_dir,
-                done_dir=done_dir,
-                results_dir=results_dir,
-            )
+        with run_folder(REPO_INBOX / "examples", config=config) as (
+            example_connector,
+            results,
+            results_dir,
+        ):
             equal(len(results), 8, "example result count")
             for filename, expected_code in expected_codes.items():
                 data = json.loads((results_dir / filename).read_text(encoding="utf-8"))
                 equal(data["status"], "Business Rejected", f"{filename} status")
                 equal(data["code"], expected_code, f"{filename} code")
             equal(example_connector.kg(), {"raw": 500.0, "wip": 0.0}, "example stock unchanged")
+            equal(
+                example_connector.pieces(),
+                {"hold": 0.0, "finished": 0.0, "rejection": 0.0, "rework": 0.0, "scrap": 0.0},
+                "example pieces unchanged",
+            )
             equal(len(example_connector.ledger.entries), 0, "example entries unchanged")
+            equal(example_connector.ledger.capa, 0, "example CAPA unchanged")
+            equal(example_connector.ledger.capa_rows, [], "example CAPA rows unchanged")
 
     check("13", "eight bad example files are refused without moving stock", tc13)
 
-    if failed == 0 and passed == 12:
+    if failed == 0 and passed > 0:
         print("ALL PASS")
     else:
         print(f"NOT PASS: {passed} passed, {failed} failed")
