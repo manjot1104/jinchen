@@ -157,7 +157,7 @@ class ReconcileTests(unittest.TestCase):
     def test_e_dup_receipt_counts_in_stock_results_with_no_gaps(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            connector, results_dir = self.run_samples(root)
+            connector, results_dir = self._run_inbox(SAMPLES, root)
             inbox_dir = root / "in"
             done_dir = root / "done"
             tenth = inbox_dir / "10-receipt-C-1-repeat.json"
