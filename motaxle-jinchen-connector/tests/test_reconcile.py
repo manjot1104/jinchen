@@ -3,6 +3,7 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from connector.inbox import read_all
 from connector.poc import Connector
@@ -127,16 +128,21 @@ class ReconcileTests(unittest.TestCase):
             connector, results_dir = self._run_inbox(SAMPLES, Path(temp))
             locked_file = results_dir / "locked.json"
             locked_file.write_text('{"status": "Posted"}', encoding="utf-8")
-            locked_file.chmod(0)
-            try:
+
+            real_read_text = Path.read_text
+
+            def fake_read_text(self_path, *args, **kwargs):
+                if self_path.name == "locked.json":
+                    raise PermissionError(f"Permission denied: {self_path}")
+                return real_read_text(self_path, *args, **kwargs)
+
+            with mock.patch.object(Path, "read_text", autospec=True, side_effect=fake_read_text):
                 result = reconcile(connector, results_dir)
                 self.assertIn("locked.json", result["unreadable"])
                 self.assertEqual(result["stock_results"], 7)
                 self.assertEqual(result["entries"], 7)
                 self.assertEqual(result["missing_entry"], [])
                 self.assertEqual(result["missing_result"], [])
-            finally:
-                locked_file.chmod(0o644)
 
     def test_empty_results_dir_reports_all_entries_as_missing_result(self):
         with tempfile.TemporaryDirectory() as temp:
