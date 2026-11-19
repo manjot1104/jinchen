@@ -142,7 +142,10 @@ class Desk:
                 message["completed"] = 0
         result = self.connector.process(message, drop_log=drop_log, attempt_id=attempt_id)
         text = result.message
-        if drop_log and not result.code:
+        if getattr(self.connector, "log_file_error", False):
+            text = text + " The log file could not be written."
+            self.connector.log_file_error = False
+        elif drop_log and not result.code:
             text = text + " The stock entry was saved, then the log write failed."
         row = {
             "id": attempt_id,
@@ -776,6 +779,8 @@ function syncComposer() {
 
 async function load() {
   state = await (await fetch("/api/state")).json();
+  const h = (window.location.hash || "").replace("#", "");
+  if (screens.indexOf(h) >= 0) view = h;
   paint();
 }
 

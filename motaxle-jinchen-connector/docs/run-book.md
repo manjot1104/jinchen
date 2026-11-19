@@ -16,7 +16,7 @@ If you find a filled password anywhere in the repository, stop and tell the lead
 
 1. Press Ctrl+C in the terminal where `python3 server.py` runs.
 2. Run `python3 server.py` again and open http://127.0.0.1:8765.
-3. The ledger is in memory. A restart starts at raw 500 kg, both switches off, and WO-2401 open. The Message log shows the connector results from the last session. A Reset job clears it. Files already in `inbox/done/` stay there and are not read again.
+3. The ledger is in memory. The desk now starts where the last session ended (raw, WIP, hold and the Message log). A stock entry whose log write failed is not known after a restart. A Reset job clears it. Files already in `inbox/done/` stay there and are not read again.
 
 If the desk does not start:
 

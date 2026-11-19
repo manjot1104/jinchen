@@ -246,6 +246,91 @@ class LogTests(unittest.TestCase):
             self.assertEqual(len(desk.attempts), 1)
             self.assertEqual(desk.attempts[0]["message"], "Job reset. The message log was cleared.")
 
+    def test_criterion_1_restart_restores_raw_wip_and_hold(self):
+        with tempfile.TemporaryDirectory() as temp:
+            log_file = Path(temp) / "log.jsonl"
+            desk1 = Desk(log_path=str(log_file))
+            desk1.run("issue-again")
+            desk1.run("return")
+            desk1.run("confirm-10")
+            desk1.run("confirm-20")
+            desk1.run("c1")
+
+            desk2 = Desk(log_path=str(log_file))
+            self.assertEqual(desk2.connector.kg()["raw"], 384.0)
+            self.assertEqual(desk2.connector._kg_out("WO-2401"), 116.0)
+            self.assertEqual(desk2.connector.pieces()["hold"], 40.0)
+
+    def test_criterion_2_duplicate_and_cancel_and_fresh_confirm(self):
+        with tempfile.TemporaryDirectory() as temp:
+            log_file = Path(temp) / "log.jsonl"
+            desk1 = Desk(log_path=str(log_file))
+            desk1.run("issue-again")
+            desk1.run("return")
+            desk1.run("confirm-10")
+            desk1.run("confirm-20")
+            desk1.run("c1")
+
+            desk2 = Desk(log_path=str(log_file))
+            res_dup = desk2.run("issue-again")
+            self.assertEqual(res_dup["status"], "Posted")
+            self.assertEqual(res_dup["code"], "E-DUP")
+            self.assertEqual(res_dup["document"], "STE-0001")
+
+            res_cancel = desk2.apply("cancel", {"kind": "cancel", "id": "WO-CAN", "work_order": "WO-2401"})
+            self.assertEqual(res_cancel["status"], "Business Rejected")
+            self.assertEqual(res_cancel["code"], "E-QTY")
+            self.assertEqual(res_cancel["message"], "Steel is still out. Return or scrap it before cancel.")
+
+        with tempfile.TemporaryDirectory() as temp2:
+            log_file2 = Path(temp2) / "log.jsonl"
+            d_fresh1 = Desk(log_path=str(log_file2))
+            d_fresh1.run("issue-again")
+
+            d_fresh2 = Desk(log_path=str(log_file2))
+            res_conf = d_fresh2.run("confirm-10")
+            self.assertEqual(res_conf["status"], "Posted")
+
+    def test_criterion_3_operations_confirmed_and_lookup_equal(self):
+        with tempfile.TemporaryDirectory() as temp:
+            log_file = Path(temp) / "log.jsonl"
+            desk1 = Desk(log_path=str(log_file))
+            desk1.run("issue-again")
+            desk1.run("return")
+            desk1.run("confirm-10")
+            desk1.run("confirm-20")
+            desk1.run("c1")
+            lookup_before = desk1.connector.lookup("B-1")
+
+            desk2 = Desk(log_path=str(log_file))
+            payload2 = desk2.payload()
+            ops = {op["op"]: op["state"] for op in payload2["operations"]}
+            self.assertEqual(ops[10], "Confirmed")
+            self.assertEqual(ops[20], "Confirmed")
+            self.assertEqual(desk2.connector.lookup("B-1"), lookup_before)
+
+    def test_old_row_with_no_entry_field_is_history_only(self):
+        with tempfile.TemporaryDirectory() as temp:
+            log_file = Path(temp) / "log.jsonl"
+            row = {
+                "ref": "J-100",
+                "work_order": "WO-2401",
+                "kind": "issue",
+                "status": "Posted",
+                "code": "",
+                "document": "STE-0001",
+                "quantities": {},
+                "attempt_id": "issue-again",
+            }
+            log_file.write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+            desk = Desk(log_path=str(log_file))
+            self.assertEqual(len(desk.attempts), 1)
+            self.assertEqual(desk.attempts[0]["id"], "issue-again")
+            self.assertEqual(desk.attempts[0]["message"], "Read back from the log file.")
+            self.assertEqual(len(desk.connector.ledger.entries), 0)
+            self.assertEqual(desk.connector.kg()["raw"], 500.0)
+
 
 if __name__ == "__main__":
     unittest.main()
