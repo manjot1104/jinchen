@@ -1,7 +1,9 @@
 """File-based inbox helpers for the Jinchen POC."""
 
 import json
+import os
 import shutil
+import tempfile
 from pathlib import Path
 
 from connector.poc import DEFAULT_WEIGHT, ConfigError, require_test_mode
@@ -12,6 +14,17 @@ INBOX_DIR = PROJECT_ROOT / "inbox" / "in"
 DONE_DIR = PROJECT_ROOT / "inbox" / "done"
 RESULTS_DIR = PROJECT_ROOT / "inbox" / "results"
 CONFIG_PATH = PROJECT_ROOT / "config.json"
+
+
+def _validate_config(data):
+    """Validate a config dict and return normalized mode, password, and weight."""
+    if not isinstance(data, dict):
+        raise ConfigError("config.json is not a valid JSON object.")
+
+    mode = data.get("mode")
+    live_password = data.get("live_password") or ""
+    require_test_mode(mode, live_password)
+    return {"mode": mode, "live_password": live_password, "weight": _weight(data.get("weight"))}
 
 
 def load_config(path=None):
@@ -30,13 +43,7 @@ def load_config(path=None):
         raise ConfigError("config.json was not found at %s." % config_path)
     except (json.JSONDecodeError, UnicodeDecodeError):
         raise ConfigError("config.json is not a valid JSON object.")
-    if not isinstance(data, dict):
-        raise ConfigError("config.json is not a valid JSON object.")
-
-    mode = data.get("mode")
-    live_password = data.get("live_password") or ""
-    require_test_mode(mode, live_password)
-    return {"mode": mode, "live_password": live_password, "weight": _weight(data.get("weight"))}
+    return _validate_config(data)
 
 
 WEIGHT_SENTENCE = "config.json weight needs kg_per_piece above 0 and loss_allowance from 0 to 1."
@@ -83,19 +90,42 @@ def list_inbox(inbox_dir=None):
     )
 
 
-def _unique_target(directory, filename):
-    """Return directory / filename, or add a numeric suffix if it already exists."""
-    target = directory / filename
-    if not target.exists():
-        return target
+def _write_result_atomic(results_directory, filename, result_data):
+    """Write result JSON to a temp file and atomically replace results/<filename>."""
+    result_file = results_directory / filename
+    tmp_fd, tmp_name = tempfile.mkstemp(dir=results_directory, prefix=".tmp-", suffix=".json")
+    try:
+        with os.fdopen(tmp_fd, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(result_data, indent=2) + "\n")
+        os.replace(tmp_name, result_file)
+    except Exception:
+        if os.path.exists(tmp_name):
+            os.unlink(tmp_name)
+        raise
+
+
+def _move_to_done_unique(source, done_directory):
+    """Move source into done_directory without overwriting an existing file."""
+    target = done_directory / source.name
     stem = target.stem
     suffix = target.suffix
-    counter = 1
+    counter = 0
     while True:
-        candidate = directory / f"{stem}-{counter}{suffix}"
-        if not candidate.exists():
-            return candidate
-        counter += 1
+        candidate = target if counter == 0 else done_directory / f"{stem}-{counter}{suffix}"
+        try:
+            fd = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            counter += 1
+            continue
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(source.read_bytes())
+        except Exception:
+            if candidate.exists():
+                candidate.unlink()
+            raise
+        source.unlink()
+        return candidate
 
 
 def read_next(
@@ -171,15 +201,10 @@ def read_next(
     done_directory.mkdir(parents=True, exist_ok=True)
     results_directory.mkdir(parents=True, exist_ok=True)
 
-    result_file = _unique_target(results_directory, source.name)
-    result_file.write_text(
-        json.dumps(result_data, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    _write_result_atomic(results_directory, source.name, result_data)
 
     if move_to_done:
-        done_target = _unique_target(done_directory, source.name)
-        source.rename(done_target)
+        _move_to_done_unique(source, done_directory)
 
     return result_data
 
@@ -201,7 +226,7 @@ def read_all(
     if config is None:
         load_config(config_path)
     else:
-        require_test_mode(config.get("mode"), config.get("live_password") or "")
+        _validate_config(config)
     files = list_inbox(inbox_dir)
     results = []
 

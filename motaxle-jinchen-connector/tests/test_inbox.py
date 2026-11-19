@@ -258,13 +258,13 @@ class InboxTests(unittest.TestCase):
             self.assertTrue((done / "01-boom.json").exists())
             self.assertEqual(json.loads((results / "01-boom.json").read_text())["code"], "E-ITEM")
 
-    def test_destination_collision_preserves_existing_done_and_result_files(self):
+    def test_destination_collision_preserves_done_and_updates_result(self):
         with tempfile.TemporaryDirectory() as temp:
             inbox, done, results = temp_inbox(Path(temp))
             done.mkdir()
             results.mkdir()
             (done / ISSUE_FILE).write_text("original-done", encoding="utf-8")
-            (results / ISSUE_FILE).write_text("original-result", encoding="utf-8")
+            (results / ISSUE_FILE).write_text('{"status": "Queued"}', encoding="utf-8")
             shutil.copy2(SAMPLES / ISSUE_FILE, inbox / ISSUE_FILE)
             connector = Connector()
 
@@ -276,13 +276,23 @@ class InboxTests(unittest.TestCase):
             self.assertEqual(outcome["document"], "STE-0001")
             self.assertFalse((inbox / ISSUE_FILE).exists())
             self.assertEqual((done / ISSUE_FILE).read_text(encoding="utf-8"), "original-done")
-            self.assertEqual((results / ISSUE_FILE).read_text(encoding="utf-8"), "original-result")
             self.assertTrue((done / "01-issue-J-100-log-fails-1.json").exists())
-            collided_result = json.loads(
-                (results / "01-issue-J-100-log-fails-1.json").read_text(encoding="utf-8")
+            self.assertFalse((results / "01-issue-J-100-log-fails-1.json").exists())
+            updated_result = json.loads((results / ISSUE_FILE).read_text(encoding="utf-8"))
+            self.assertEqual(updated_result["status"], "Posted")
+            self.assertEqual(updated_result["document"], "STE-0001")
+
+            shutil.copy2(SAMPLES / ISSUE_FILE, inbox / ISSUE_FILE)
+            second = read_next(
+                connector, inbox_dir=inbox, done_dir=done, results_dir=results
             )
-            self.assertEqual(collided_result["status"], "Posted")
-            self.assertEqual(collided_result["document"], "STE-0001")
+            self.assertEqual(second["code"], "E-DUP")
+            self.assertTrue((done / "01-issue-J-100-log-fails-2.json").exists())
+            self.assertFalse((results / "01-issue-J-100-log-fails-2.json").exists())
+            self.assertEqual(
+                json.loads((results / ISSUE_FILE).read_text(encoding="utf-8"))["code"],
+                "E-DUP",
+            )
 
     def test_non_collision_preserves_original_filename(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -333,6 +343,25 @@ class InboxTests(unittest.TestCase):
                 )
 
             self.assertEqual(str(caught.exception), "Mode must be test or live.")
+
+    def test_read_all_with_empty_config_dict_refuses_before_moving(self):
+        with tempfile.TemporaryDirectory() as temp:
+            inbox, done, results = temp_inbox(Path(temp))
+            shutil.copy2(SAMPLES / ISSUE_FILE, inbox / ISSUE_FILE)
+
+            with self.assertRaises(ConfigError) as caught:
+                read_all(
+                    Connector(),
+                    inbox_dir=inbox,
+                    done_dir=done,
+                    results_dir=results,
+                    config={},
+                )
+
+            self.assertEqual(str(caught.exception), "Mode must be test or live.")
+            self.assertTrue((inbox / ISSUE_FILE).exists())
+            self.assertFalse(done.exists())
+            self.assertFalse(results.exists())
 
 
 if __name__ == "__main__":

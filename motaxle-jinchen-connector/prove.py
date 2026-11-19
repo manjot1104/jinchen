@@ -11,6 +11,7 @@ PROJECT = Path(__file__).resolve().parent
 REPO_INBOX = PROJECT / "inbox"
 
 
+CHECKS = ("02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12", "13")
 passed = 0
 failed = 0
 
@@ -63,7 +64,8 @@ def run_folder(src_dir, config=None):
         for source in sorted(Path(src_dir).glob("*.json")):
             shutil.copy2(source, inbox_dir / source.name)
 
-        connector = Connector()
+        weight = config.get("weight") if isinstance(config, dict) else None
+        connector = Connector(weight=weight)
         results = read_all(
             connector,
             switch_a=False,
@@ -245,6 +247,8 @@ def main():
         ):
             done_dir = results_dir.parent / "done"
             equal(len(results), 9, "sample result count")
+            for item in results:
+                equal(item["status"], "Posted", "sample status")
             equal(inbox_connector.kg(), {"raw": 384.0, "wip": 116.0}, "inbox sample kg")
             equal(
                 inbox_connector.pieces(),
@@ -297,7 +301,7 @@ def main():
 
     check("13", "eight bad example files are refused without moving stock", tc13)
 
-    if failed == 0 and passed > 0:
+    if failed == 0 and passed == len(CHECKS):
         print("ALL PASS")
     else:
         print(f"NOT PASS: {passed} passed, {failed} failed")

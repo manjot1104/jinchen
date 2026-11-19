@@ -190,10 +190,34 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(len(connector.ledger.entries), 0)
             self.assertEqual(connector.ledger.capa, 0)
 
-    def test_prove_completion_does_not_depend_on_hardcoded_count(self):
-        source = (PROJECT / "prove.py").read_text(encoding="utf-8")
-        self.assertNotIn("passed == 12", source)
-        self.assertNotIn("passed == 10", source)
+    def test_prove_main_fails_with_tighter_loss_allowance(self):
+        import prove
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "config.json"
+            path.write_text(json.dumps({
+                "mode": "test",
+                "live_password": "",
+                "weight": {"kg_per_piece": 1.2, "loss_allowance": 0.02},
+            }))
+            with mock.patch.object(inbox, "CONFIG_PATH", path), \
+                 mock.patch("builtins.print") as printed:
+                with self.assertRaises(SystemExit) as caught:
+                    prove.main()
+        self.assertEqual(caught.exception.code, 1)
+        output = "\n".join(str(call.args[0]) for call in printed.call_args_list if call.args)
+        self.assertIn("TC-12 FAIL", output)
+        self.assertNotIn("ALL PASS", output)
+
+    def test_prove_main_fails_if_a_registered_check_is_missing(self):
+        import prove
+        with mock.patch.object(prove, "CHECKS", prove.CHECKS + ("14",)), \
+             mock.patch("builtins.print") as printed:
+            with self.assertRaises(SystemExit) as caught:
+                prove.main()
+        self.assertEqual(caught.exception.code, 1)
+        lines = [str(call.args[0]) for call in printed.call_args_list if call.args]
+        self.assertNotIn("ALL PASS", lines)
+        self.assertTrue(any(line.startswith("NOT PASS:") for line in lines))
 
 
 if __name__ == "__main__":
