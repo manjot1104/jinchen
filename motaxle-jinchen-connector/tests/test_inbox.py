@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest import mock
 
 from connector.inbox import copy_samples, list_inbox, read_all, read_next
-from connector.poc import Connector
+from connector.poc import ConfigError, Connector
 
 PROJECT = Path(__file__).resolve().parent.parent
 SAMPLES = PROJECT / "inbox" / "samples"
@@ -297,6 +297,42 @@ class InboxTests(unittest.TestCase):
             self.assertTrue((done / ISSUE_FILE).exists())
             self.assertTrue((results / ISSUE_FILE).exists())
             self.assertFalse((done / "01-issue-J-100-log-fails-1.json").exists())
+
+    def test_read_all_with_filled_password_in_config_refuses_before_moving(self):
+        with tempfile.TemporaryDirectory() as temp:
+            inbox, done, results = temp_inbox(Path(temp))
+            shutil.copy2(SAMPLES / ISSUE_FILE, inbox / ISSUE_FILE)
+            connector = Connector()
+
+            with self.assertRaises(ConfigError):
+                read_all(
+                    connector,
+                    inbox_dir=inbox,
+                    done_dir=done,
+                    results_dir=results,
+                    config={"mode": "test", "live_password": "secret"},
+                )
+
+            self.assertTrue((inbox / ISSUE_FILE).exists())
+            self.assertFalse(done.exists())
+            self.assertFalse(results.exists())
+
+    def test_read_all_with_bad_mode_in_config_refuses(self):
+        with tempfile.TemporaryDirectory() as temp:
+            inbox, done, results = temp_inbox(Path(temp))
+            shutil.copy2(SAMPLES / ISSUE_FILE, inbox / ISSUE_FILE)
+            connector = Connector()
+
+            with self.assertRaises(ConfigError) as caught:
+                read_all(
+                    connector,
+                    inbox_dir=inbox,
+                    done_dir=done,
+                    results_dir=results,
+                    config={"mode": "demo", "live_password": ""},
+                )
+
+            self.assertEqual(str(caught.exception), "Mode must be test or live.")
 
 
 if __name__ == "__main__":

@@ -200,6 +200,8 @@ def read_all(
     """
     if config is None:
         load_config(config_path)
+    else:
+        require_test_mode(config.get("mode"), config.get("live_password") or "")
     files = list_inbox(inbox_dir)
     results = []
 
