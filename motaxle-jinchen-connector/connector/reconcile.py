@@ -35,7 +35,7 @@ def reconcile(connector, results_dir):
 
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, UnicodeDecodeError):
+            except (json.JSONDecodeError, UnicodeDecodeError, OSError):
                 unreadable.append(path.name)
                 continue
 
