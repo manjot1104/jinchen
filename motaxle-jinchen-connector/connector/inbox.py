@@ -111,7 +111,7 @@ def _move_to_done_unique(source, done_directory):
     suffix = target.suffix
     counter = 0
     while True:
-        candidate = target if counter == 0 else done_directory / f"{stem}-{counter}{suffix}"
+        candidate = target if counter == 0 else done_directory / f"{stem}.dup{counter}{suffix}"
         try:
             fd = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         except FileExistsError:
@@ -220,12 +220,12 @@ def read_all(
 ):
     """Read the current inbox in filename order, respecting Switch A.
 
-    The config is checked before the first file is touched. A filled live
-    password or a bad mode raises ConfigError and nothing moves.
+    Always validates the current config file before any inbox file is
+    touched. If a config dict is also passed, it is validated as well so a
+    stale or invalid dict cannot bypass the safety gate.
     """
-    if config is None:
-        load_config(config_path)
-    else:
+    load_config(config_path)
+    if config is not None:
         _validate_config(config)
     files = list_inbox(inbox_dir)
     results = []

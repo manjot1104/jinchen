@@ -167,10 +167,13 @@ class ConfigTests(unittest.TestCase):
             configs_passed.append(kwargs.get("config"))
             return real_read_all(*args, **kwargs)
 
-        with mock.patch.object(prove, "load_config", wraps=real_load) as mocked_load, \
-             mock.patch.object(prove, "read_all", side_effect=spy_read_all), \
-             mock.patch("builtins.print"):
-            prove.main()
+        with tempfile.TemporaryDirectory() as temp:
+            path = write_config(temp, "test", "")
+            with mock.patch.object(inbox, "CONFIG_PATH", path), \
+                 mock.patch.object(prove, "load_config", wraps=real_load) as mocked_load, \
+                 mock.patch.object(prove, "read_all", side_effect=spy_read_all), \
+                 mock.patch("builtins.print"):
+                prove.main()
 
         self.assertEqual(mocked_load.call_count, 1)
         self.assertEqual(len(configs_passed), 2)
@@ -180,15 +183,18 @@ class ConfigTests(unittest.TestCase):
 
     def test_prove_run_folder_isolates_samples_and_examples(self):
         import prove
-        with prove.run_folder(PROJECT / "inbox" / "samples") as (connector, results, results_dir):
-            self.assertEqual(len(results), 9)
-            self.assertEqual(connector.kg(), {"raw": 384.0, "wip": 116.0})
-            self.assertEqual(len(list(results_dir.glob("*.json"))), 9)
-        with prove.run_folder(PROJECT / "inbox" / "examples") as (connector, results, results_dir):
-            self.assertEqual(len(results), 8)
-            self.assertEqual(connector.kg(), {"raw": 500.0, "wip": 0.0})
-            self.assertEqual(len(connector.ledger.entries), 0)
-            self.assertEqual(connector.ledger.capa, 0)
+        with tempfile.TemporaryDirectory() as temp:
+            path = write_config(temp, "test", "")
+            with mock.patch.object(inbox, "CONFIG_PATH", path):
+                with prove.run_folder(PROJECT / "inbox" / "samples") as (connector, results, results_dir):
+                    self.assertEqual(len(results), 9)
+                    self.assertEqual(connector.kg(), {"raw": 384.0, "wip": 116.0})
+                    self.assertEqual(len(list(results_dir.glob("*.json"))), 9)
+                with prove.run_folder(PROJECT / "inbox" / "examples") as (connector, results, results_dir):
+                    self.assertEqual(len(results), 8)
+                    self.assertEqual(connector.kg(), {"raw": 500.0, "wip": 0.0})
+                    self.assertEqual(len(connector.ledger.entries), 0)
+                    self.assertEqual(connector.ledger.capa, 0)
 
     def test_prove_main_fails_with_tighter_loss_allowance(self):
         import prove
@@ -208,12 +214,33 @@ class ConfigTests(unittest.TestCase):
         self.assertIn("TC-12 FAIL", output)
         self.assertNotIn("ALL PASS", output)
 
+    def test_prove_main_fails_with_heavier_kg_per_piece(self):
+        import prove
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "config.json"
+            path.write_text(json.dumps({
+                "mode": "test",
+                "live_password": "",
+                "weight": {"kg_per_piece": 1.5, "loss_allowance": 0.05},
+            }))
+            with mock.patch.object(inbox, "CONFIG_PATH", path), \
+                 mock.patch("builtins.print") as printed:
+                with self.assertRaises(SystemExit) as caught:
+                    prove.main()
+        self.assertEqual(caught.exception.code, 1)
+        output = "\n".join(str(call.args[0]) for call in printed.call_args_list if call.args)
+        self.assertIn("TC-12 FAIL", output)
+        self.assertNotIn("ALL PASS", output)
+
     def test_prove_main_fails_if_a_registered_check_is_missing(self):
         import prove
-        with mock.patch.object(prove, "CHECKS", prove.CHECKS + ("14",)), \
-             mock.patch("builtins.print") as printed:
-            with self.assertRaises(SystemExit) as caught:
-                prove.main()
+        with tempfile.TemporaryDirectory() as temp:
+            path = write_config(temp, "test", "")
+            with mock.patch.object(inbox, "CONFIG_PATH", path), \
+                 mock.patch.object(prove, "CHECKS", prove.CHECKS + ("14",)), \
+                 mock.patch("builtins.print") as printed:
+                with self.assertRaises(SystemExit) as caught:
+                    prove.main()
         self.assertEqual(caught.exception.code, 1)
         lines = [str(call.args[0]) for call in printed.call_args_list if call.args]
         self.assertNotIn("ALL PASS", lines)
