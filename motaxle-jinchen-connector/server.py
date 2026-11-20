@@ -7,8 +7,10 @@ Nothing is sent to Jinchen or to a live ERPNext site.
 
 import json
 import os
+import shutil
 import sys
 import threading
+from datetime import datetime
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import unquote
@@ -16,7 +18,7 @@ from urllib.parse import unquote
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from connector.poc import ConfigError, Connector, LOG_FILE_ERROR_MESSAGE
-from connector.inbox import copy_samples, list_inbox, load_config, read_all
+from connector.inbox import copy_samples, list_inbox, load_config, read_all, DONE_DIR, RESULTS_DIR
 
 HOST = "127.0.0.1"
 PORT = 8765
@@ -53,6 +55,12 @@ class Desk:
             for row in self.connector.log
         )
 
+    def _take_log_error(self, text):
+        if getattr(self.connector, "log_file_error", False):
+            self.connector.log_file_error = False
+            return (text + " " + LOG_FILE_ERROR_MESSAGE).strip() if text else LOG_FILE_ERROR_MESSAGE
+        return text
+
     def reset(self):
         cleared = True
         if self.log_path and os.path.exists(self.log_path):
@@ -64,32 +72,48 @@ class Desk:
                         pass
                 except OSError:
                     cleared = False
-        if self.log_path:
-            p = Path(self.log_path)
-            counter_file = p.with_name(".ste_counter")
-            if counter_file.exists():
+        if self.connector.ledger_path and os.path.exists(self.connector.ledger_path):
+            try:
+                os.remove(self.connector.ledger_path)
+            except OSError:
                 try:
-                    counter_file.unlink()
+                    with open(self.connector.ledger_path, "w", encoding="utf-8") as f:
+                        pass
                 except OSError:
                     pass
-            results_dir = p.parent / "results"
-            if results_dir.is_dir():
-                for f in results_dir.glob("*.json"):
+
+        # Item 4: Move to timestamped archive folder only when log could be cleared
+        if cleared:
+            # Item 20: Use RESULTS_DIR, DONE_DIR, and connector.counter_path
+            res_dir = RESULTS_DIR
+            d_dir = DONE_DIR
+            results_files = [f for f in res_dir.iterdir() if f.is_file() and f.suffix.lower() == ".json"] if res_dir.is_dir() else []
+            done_files = [f for f in d_dir.iterdir() if f.is_file() and f.suffix.lower() == ".json"] if d_dir.is_dir() else []
+            if results_files or done_files:
+                time_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+                archive_dir = d_dir.parent / "archive" / time_str
+                archive_dir.mkdir(parents=True, exist_ok=True)
+                for f in results_files:
                     try:
-                        f.unlink()
+                        shutil.move(str(f), str(archive_dir / f.name))
                     except OSError:
                         pass
-            done_dir = p.parent / "done"
-            if done_dir.is_dir():
-                for f in done_dir.glob("*.json"):
+                for f in done_files:
                     try:
-                        f.unlink()
+                        shutil.move(str(f), str(archive_dir / f.name))
                     except OSError:
                         pass
+
+            if self.connector.counter_path and self.connector.counter_path.exists():
+                try:
+                    self.connector.counter_path.unlink()
+                except OSError:
+                    pass
+
         path_to_use = self.log_path if cleared else None
         self.connector = Connector(weight=self.weight, log_path=path_to_use)
-        self.connector.ledger._n = 0
-        if self.connector.counter_path and self.connector.counter_path.exists():
+        # Item 12: Dropped self.connector.ledger._n = 0
+        if cleared and self.connector.counter_path and self.connector.counter_path.exists():
             try:
                 self.connector.counter_path.unlink()
             except OSError:
@@ -124,6 +148,9 @@ class Desk:
 
         last_result = None
         for source, result in zip(files, results):
+            # Item 15: Only add to attempts if written to log
+            if not result.get("logged", True):
+                continue
             row = {
                 "id": source.name,
                 "status": result["status"],
@@ -140,10 +167,7 @@ class Desk:
             if results
             else "Inbox is empty."
         )
-        if getattr(self.connector, "log_file_error", False):
-            inbox_msg = inbox_msg + " " + LOG_FILE_ERROR_MESSAGE
-            self.connector.log_file_error = False
-        payload["inbox_message"] = inbox_msg
+        payload["inbox_message"] = self._take_log_error(inbox_msg)
         return payload
 
     def apply(self, label, message, drop_log=False):
@@ -159,10 +183,7 @@ class Desk:
                     "document": "",
                     "message": "Switch A is on. Already queued.",
                 }
-            msg = "Switch A is on. Logged only. Stock was not posted. Turning Switch A off does not post the queue."
-            if getattr(self.connector, "log_file_error", False):
-                msg = msg + " " + LOG_FILE_ERROR_MESSAGE
-                self.connector.log_file_error = False
+            msg = self._take_log_error("Switch A is on. Logged only. Stock was not posted. Turning Switch A off does not post the queue.")
             row = {
                 "id": attempt_id,
                 "status": "Queued",
@@ -194,9 +215,7 @@ class Desk:
         text = result.message
         if drop_log and not result.code:
             text = text + " The stock entry was saved, then the log write failed."
-        if getattr(self.connector, "log_file_error", False):
-            text = text + " " + LOG_FILE_ERROR_MESSAGE
-            self.connector.log_file_error = False
+        text = self._take_log_error(text)
         row = {
             "id": attempt_id,
             "status": result.status,
@@ -254,9 +273,7 @@ class Desk:
             quantities=None,
             attempt_id="release",
         )
-        if getattr(self.connector, "log_file_error", False):
-            row["message"] = row["message"] + " " + LOG_FILE_ERROR_MESSAGE
-            self.connector.log_file_error = False
+        row["message"] = self._take_log_error(row["message"])
         self.attempts.append(row)
         return row
 
@@ -814,6 +831,7 @@ function paint() {
 
 function show(name) {
   view = name;
+  window.location.hash = "#" + name;
   const kindFor = {material: "issue", operations: "confirm", quality: "receipt"};
   if (kindFor[name]) {
     document.getElementById("m-kind").value = kindFor[name];
@@ -844,8 +862,11 @@ function syncComposer() {
 async function load() {
   state = await (await fetch("/api/state")).json();
   const h = (window.location.hash || "").replace("#", "");
-  if (screens.indexOf(h) >= 0) view = h;
-  paint();
+  if (screens.indexOf(h) >= 0) {
+    show(h);
+  } else {
+    paint();
+  }
 }
 
 async function send(id) {

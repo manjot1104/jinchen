@@ -2,7 +2,7 @@
 
 **POC contract, not a signed Jinchen API.** These JSON fields are what the local stand-in accepts. When the Jinchen API pack and the signed interface note arrive, compare them with this page field by field. A field that differs is a change to the connector, not to this page.
 
-Every message is one JSON object. A file or a typed message that is not an object returns **E-ITEM** *Unknown message.* Numbers are JSON numbers. A numeric string such as `"4"` is accepted, but `"abc"`, `true`, or a blank string is not a number. When a log write fails on the desk, the result message ends with *The log file could not be written.*
+Every message is one JSON object. A file or a typed message that is not an object returns **E-ITEM** *Unknown message.* Numbers are JSON numbers. A numeric string such as `"4"` is accepted, but `"abc"`, `true`, or a blank string is not a number. When a log write fails on the desk, the result message ends with *The log file could not be written.*; inbox processing reports log file errors in the batch summary.
 
 ## Codes
 

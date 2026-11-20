@@ -16,7 +16,7 @@ If you find a filled password anywhere in the repository, stop and tell the lead
 
 1. Press Ctrl+C in the terminal where `python3 server.py` runs.
 2. Run `python3 server.py` again and open http://127.0.0.1:8765.
-3. The ledger is in memory. The desk now starts where the last session ended (raw, WIP, hold and the Message log). A stock entry whose log write failed is not known after a restart. A Reset job clears it. Files already in `inbox/done/` stay there and are not read again.
+3. The ledger is persisted in `inbox/ledger.jsonl`. The desk starts where the last session ended (raw, WIP, hold, stock entries and the Message log). Files already in `inbox/done/` stay there and are not read again.
 
 If the desk does not start:
 
@@ -27,7 +27,7 @@ If the desk does not start:
 | *config.json weight needs kg_per_piece above 0 and loss_allowance from 0 to 1.* | Fix the `weight` block, or remove it to use 1.20 and 0.05. |
 | `Address already in use` | Another desk holds 8765. `lsof -i :8765` names it. Stop that one, not a stranger's process. |
 
-**Reset job** on the Today screen clears the ledger, the message log, the STE counter, and clears previous files in `inbox/results/` and `inbox/done/` so document numbering starts fresh from STE-0001.
+**Reset job** on the Today screen clears the ledger, the message log, the STE counter, and moves previous files in `inbox/results/` and `inbox/done/` to a timestamped folder in `inbox/archive/<time>/` when the message log is cleared so document numbering starts fresh from STE-0001.
 
 ## The two switches
 

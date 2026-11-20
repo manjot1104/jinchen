@@ -122,16 +122,12 @@ class LogTests(unittest.TestCase):
 
     def test_desk_with_no_log_path_creates_no_file(self):
         with tempfile.TemporaryDirectory() as temp:
-            old_cwd = os.getcwd()
-            os.chdir(temp)
-            try:
+            temp_log = Path(temp) / "inbox" / "log.jsonl"
+            with mock.patch("server.LOG_PATH", str(temp_log)):
                 desk = Desk()
                 self.assertIsNone(desk.log_path)
                 desk.run("confirm-10")
-                self.assertFalse((Path(temp) / "inbox" / "log.jsonl").exists())
-                self.assertFalse((Path(temp) / "log.jsonl").exists())
-            finally:
-                os.chdir(old_cwd)
+                self.assertFalse(temp_log.exists())
 
     def test_desk_restart_loads_same_three_rows_in_attempts(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -654,14 +650,15 @@ class LogTests(unittest.TestCase):
             (results_dir / "01-issue.json").write_text('{"document": "STE-0007"}', encoding="utf-8")
             (done_dir / "01-issue.json").write_text('{"id": "J-1"}', encoding="utf-8")
 
-            desk = Desk(log_path=str(log_file))
-            self.assertEqual(desk.connector.ledger._n, 7)
+            with mock.patch("server.RESULTS_DIR", results_dir), mock.patch("server.DONE_DIR", done_dir):
+                desk = Desk(log_path=str(log_file))
+                self.assertEqual(desk.connector.ledger._n, 7)
 
-            # Perform reset
-            desk.reset()
-            self.assertEqual(desk.connector.ledger._n, 0)
-            self.assertEqual(len(list(results_dir.glob("*.json"))), 0)
-            self.assertEqual(len(list(done_dir.glob("*.json"))), 0)
+                # Perform reset
+                desk.reset()
+                self.assertEqual(desk.connector.ledger._n, 0)
+                self.assertEqual(len(list(results_dir.glob("*.json"))), 0)
+                self.assertEqual(len(list(done_dir.glob("*.json"))), 0)
 
             # Next issue starts fresh at STE-0001
             res = desk.apply("issue", {
@@ -741,8 +738,13 @@ class LogTests(unittest.TestCase):
                 self.assertIn("The log file could not be written.", res_queued["message"])
                 self.assertFalse(desk.connector.log_file_error)
 
-                # Next action without error should NOT have the warning
-                desk.switch_a = False
+            # Next action without error should NOT have the warning
+            desk.switch_a = False
+            res_clean = desk.apply("clean-attempt", {
+                "kind": "issue", "id": "J-2", "work_order": "WO-2401", "item": "ST-20",
+                "qty": 10.0, "uom": "Kg", "from_warehouse": "Raw Material Store", "to_warehouse": "Forging WIP", "batch": "H-441",
+            })
+            self.assertNotIn("The log file could not be written.", res_clean["message"])
 
             with mock.patch("builtins.open", side_effect=OSError("disk full")):
                 res_rel = desk.release()
@@ -769,6 +771,245 @@ class LogTests(unittest.TestCase):
             self.assertEqual(res2["status"], "Queued")
             self.assertEqual(res2["message"], "Switch A is on. Already queued.")
             self.assertEqual(len(desk.attempts), 1)
+
+    def test_unlogged_entry_persists_across_restart_via_ledger(self):
+        """Must-fix Item 1: Unlogged J-100 survives restart via ledger.jsonl."""
+        with tempfile.TemporaryDirectory() as temp:
+            log_file = Path(temp) / "log.jsonl"
+            c1 = Connector(log_path=str(log_file))
+            res = c1.process(msg_issue(), drop_log=True)
+            self.assertEqual(res.status, "Posted")
+            self.assertEqual(len(c1.log), 0)
+            self.assertEqual(len(c1.ledger.entries), 1)
+
+            c2 = Connector(log_path=str(log_file))
+            self.assertEqual(len(c2.ledger.entries), 1)
+            self.assertEqual(c2.ledger.entries[0].work_order, "WO-2401")
+            self.assertEqual(c2.kg()["raw"], 380.0)
+
+    def test_corrupt_log_and_ledger_rows_skipped_without_crash(self):
+        """Must-fix Item 2: Corrupt rows in log or ledger do not crash startup."""
+        with tempfile.TemporaryDirectory() as temp:
+            log_file = Path(temp) / "log.jsonl"
+            ledger_file = Path(temp) / "ledger.jsonl"
+            with open(log_file, "w") as f:
+                f.write('{"name": 5, "work_order": ["wo"]}\n')
+                f.write('not-json\n')
+                f.write('{}\n')
+            with open(ledger_file, "w") as f:
+                f.write('{"name": 123}\n')
+                f.write('not-json\n')
+                f.write('{"name": "STE-0001", "qty": -10}\n')
+
+            c = Connector(log_path=str(log_file))
+            self.assertEqual(len(c.log), 0)
+            self.assertEqual(len(c.ledger.entries), 0)
+
+    def test_non_finite_quantities_rejected(self):
+        """Must-fix Item 3: NaN and non-finite quantities rejected with E-QTY."""
+        with tempfile.TemporaryDirectory() as temp:
+            log_file = Path(temp) / "log.jsonl"
+            c = Connector(log_path=str(log_file))
+            msg = msg_issue()
+            msg["qty"] = float("nan")
+            res = c.process(msg)
+            self.assertEqual(res.status, "Business Rejected")
+            self.assertEqual(res.code, "E-QTY")
+
+            msg["qty"] = float("inf")
+            res_inf = c.process(msg)
+            self.assertEqual(res_inf.status, "Business Rejected")
+            self.assertEqual(res_inf.code, "E-QTY")
+
+            msg["qty"] = "nan"
+            res_str = c.process(msg)
+            self.assertEqual(res_str.status, "Business Rejected")
+            self.assertEqual(res_str.code, "E-QTY")
+
+    def test_desk_reset_archives_files_when_cleared(self):
+        """Must-fix Item 4: Reset moves results, done, and counter to archive."""
+        with tempfile.TemporaryDirectory() as temp:
+            inbox_dir = Path(temp) / "inbox"
+            results_dir = inbox_dir / "results"
+            done_dir = inbox_dir / "done"
+            results_dir.mkdir(parents=True)
+            done_dir.mkdir(parents=True)
+            log_file = inbox_dir / "log.jsonl"
+            counter_file = inbox_dir / ".ste_counter"
+            (results_dir / "res1.json").write_text("{}")
+            (done_dir / "done1.json").write_text("{}")
+            counter_file.write_text("1")
+            log_file.write_text('{"name": "STE-0001"}\n')
+
+            with mock.patch("server.RESULTS_DIR", results_dir), \
+                 mock.patch("server.DONE_DIR", done_dir):
+                desk = Desk(log_path=str(log_file))
+                desk.reset()
+                self.assertIn("Job reset. The message log was cleared.", desk.attempts[-1]["message"])
+                self.assertFalse((results_dir / "res1.json").exists())
+                self.assertFalse((done_dir / "done1.json").exists())
+                archive_dir = inbox_dir / "archive"
+                self.assertTrue(archive_dir.exists())
+                archived_subdirs = list(archive_dir.iterdir())
+                self.assertEqual(len(archived_subdirs), 1)
+                self.assertTrue((archived_subdirs[0] / "res1.json").exists())
+
+    def test_desk_reset_skips_archive_when_log_locked(self):
+        """Must-fix Item 4: Reset skips archive move when log clear fails."""
+        with tempfile.TemporaryDirectory() as temp:
+            inbox_dir = Path(temp) / "inbox"
+            results_dir = inbox_dir / "results"
+            done_dir = inbox_dir / "done"
+            results_dir.mkdir(parents=True)
+            done_dir.mkdir(parents=True)
+            log_file = inbox_dir / "log.jsonl"
+            (results_dir / "res1.json").write_text("{}")
+            log_file.write_text('{"name": "STE-0001"}\n')
+
+            with mock.patch("server.RESULTS_DIR", results_dir), \
+                 mock.patch("server.DONE_DIR", done_dir):
+                desk = Desk(log_path=str(log_file))
+                with mock.patch("os.remove", side_effect=OSError("locked")), \
+                     mock.patch("builtins.open", side_effect=OSError("Permission denied")):
+                    desk.reset()
+                    self.assertIn("Job reset. The message log could not be cleared.", desk.attempts[-1]["message"])
+                    self.assertTrue((results_dir / "res1.json").exists())
+
+    def test_ste_number_raised_from_unapplied_posted_rows(self):
+        """Must-fix Item 5: Unapplied posted rows raise _n when .ste_counter missing."""
+        with tempfile.TemporaryDirectory() as temp:
+            log_file = Path(temp) / "log.jsonl"
+            with open(log_file, "w") as f:
+                f.write(json.dumps({
+                    "name": "STE-0010", "ref": "J-1", "work_order": "WO-2401",
+                    "kind": "issue", "status": "Posted", "code": "", "document": "STE-0010"
+                }) + "\n")
+            c = Connector(log_path=str(log_file))
+            self.assertGreaterEqual(c.ledger._n, 10)
+
+    def test_confirm_replay_uses_stored_facts_without_rechecking_weight(self):
+        """Should-fix Item 6: Confirm replay applies stored facts without rechecking weight."""
+        with tempfile.TemporaryDirectory() as temp:
+            log_file = Path(temp) / "log.jsonl"
+            with open(log_file, "w") as f:
+                f.write(json.dumps({
+                    "ref": "J-1", "work_order": "WO-2401", "kind": "issue",
+                    "status": "Posted", "code": "", "document": "STE-0001",
+                    "entry": {
+                        "name": "STE-0001", "ref": "J-1", "work_order": "WO-2401",
+                        "item": "ST-20", "qty": 100.0, "uom": "Kg", "batch": "H-441",
+                        "source": "Raw Material Store", "target": "Forging WIP", "kind": "issue"
+                    }
+                }) + "\n")
+                f.write(json.dumps({
+                    "ref": "C-1", "work_order": "WO-2401",
+                    "kind": "confirm", "status": "Posted", "code": "", "document": "",
+                    "entry": {"operation": 10},
+                    "quantities": {"completed": 50.0, "rejected": 0.0, "rework": 0.0, "scrap": 0.0}
+                }) + "\n")
+            # Restart with weight that would normally refuse this (e.g. kg_per_piece = 10.0)
+            c = Connector(weight={"kg_per_piece": 10.0, "loss_allowance": 0.0}, log_path=str(log_file))
+            self.assertEqual(len(c.confirmations), 1)
+            self.assertEqual(c.confirmations[0], ("WO-2401", 10, (50.0, 0.0, 0.0, 0.0)))
+
+    def test_isolated_trailing_newline_repair_on_readonly_log(self):
+        """Should-fix Item 7: Failed newline repair on readonly log sets log_file_error without failing read."""
+        with tempfile.TemporaryDirectory() as temp:
+            log_file = Path(temp) / "log.jsonl"
+            with open(log_file, "w") as f:
+                f.write(json.dumps({
+                    "name": "STE-0001", "ref": "J-1", "work_order": "WO-2401",
+                    "kind": "issue", "status": "Posted", "code": "", "document": "STE-0001"
+                }))
+            log_file.chmod(0o444)
+            try:
+                c = Connector(log_path=str(log_file))
+                self.assertEqual(len(c.log), 1)
+                self.assertTrue(c.log_file_error)
+            finally:
+                log_file.chmod(0o644)
+
+    def test_switch_a_repeat_check_uses_message_triple(self):
+        """Should-fix Item 10: Switch-A repeat check keys on (id, work_order, kind)."""
+        with tempfile.TemporaryDirectory() as temp:
+            log_file = Path(temp) / "log.jsonl"
+            desk = Desk(log_path=str(log_file))
+            desk.switch_a = True
+
+            msg1 = {"kind": "issue", "id": "J-1", "work_order": "WO-2401", "item": "ST-20", "qty": 10, "uom": "Kg", "batch": "H-441", "from_warehouse": "Raw Material Store", "to_warehouse": "Forging WIP"}
+            msg2 = {"kind": "issue", "id": "J-2", "work_order": "WO-2401", "item": "ST-20", "qty": 20, "uom": "Kg", "batch": "H-441", "from_warehouse": "Raw Material Store", "to_warehouse": "Forging WIP"}
+            r1 = desk.apply("custom", msg1)
+            r2 = desk.apply("custom", msg2)
+            self.assertIn("Switch A is on. Logged only.", r1["message"])
+            self.assertIn("Switch A is on. Logged only.", r2["message"])
+            self.assertEqual(len(desk.attempts), 2)
+
+    def test_switch_a_non_string_kind_handled_cleanly(self):
+        """Should-fix Item 11: Non-string kind does not raise TypeError in inbox."""
+        from connector import inbox
+        with tempfile.TemporaryDirectory() as temp:
+            inbox_dir = Path(temp) / "inbox"
+            inbox_dir.mkdir()
+            (inbox_dir / "01-bad.json").write_text(json.dumps({"kind": ["issue"]}))
+            log_file = Path(temp) / "log.jsonl"
+            c = Connector(log_path=str(log_file))
+            with mock.patch("connector.inbox.INBOX_DIR", inbox_dir), \
+                 mock.patch("connector.inbox.DONE_DIR", inbox_dir / "done"), \
+                 mock.patch("connector.inbox.RESULTS_DIR", inbox_dir / "results"):
+                (inbox_dir / "done").mkdir()
+                (inbox_dir / "results").mkdir()
+                res = inbox.read_next(c)
+                self.assertEqual(res["status"], "Rejected")
+                self.assertEqual(res["code"], "E-ITEM")
+
+    def test_reset_does_not_force_n_to_zero_when_results_survive(self):
+        """Should-fix Item 12: Desk.reset drops forced self.connector.ledger._n = 0."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            log_file = root / "log.jsonl"
+            results_dir = root / "results"
+            done_dir = root / "done"
+            results_dir.mkdir(parents=True)
+            done_dir.mkdir(parents=True)
+            (results_dir / "01.json").write_text('{"document": "STE-0005"}', encoding="utf-8")
+
+            with mock.patch("server.RESULTS_DIR", results_dir), \
+                 mock.patch("server.DONE_DIR", done_dir):
+                desk = Desk(log_path=str(log_file))
+                self.assertEqual(desk.connector.ledger._n, 5)
+
+                # Simulate a surviving result file that could not be moved
+                with mock.patch("shutil.move", side_effect=OSError("locked")):
+                    desk.reset()
+                    self.assertEqual(desk.connector.ledger._n, 5)
+
+    def test_duplicate_log_rows_do_not_move_stock_twice(self):
+        """Should-fix Item 13: Duplicate rows in ledger/log do not move stock twice."""
+        with tempfile.TemporaryDirectory() as temp:
+            log_file = Path(temp) / "log.jsonl"
+            ledger_file = Path(temp) / "ledger.jsonl"
+            entry_json = json.dumps({
+                "name": "STE-0001", "work_order": "WO-2401", "item": "ST-20", "qty": 100.0,
+                "uom": "Kg", "source": "Raw Material Store", "target": "Forging WIP",
+                "batch": "H-441", "ref": "J-1", "kind": "issue"
+            })
+            with open(ledger_file, "w") as f:
+                f.write(entry_json + "\n")
+                f.write(entry_json + "\n")
+            c = Connector(log_path=str(log_file))
+            self.assertEqual(len(c.ledger.entries), 1)
+            self.assertEqual(c.kg()["raw"], 400.0)
+
+    def test_scan_results_case_insensitive(self):
+        """Should-fix Item 14: _scan_results finds uppercase .JSON files."""
+        with tempfile.TemporaryDirectory() as temp:
+            results_dir = Path(temp) / "results"
+            results_dir.mkdir()
+            (results_dir / "01.JSON").write_text(json.dumps({
+                "status": "Posted", "document": "STE-0007"
+            }))
+            c = Connector(results_dir=str(results_dir))
+            self.assertGreaterEqual(c.ledger._n, 7)
 
 
 if __name__ == "__main__":

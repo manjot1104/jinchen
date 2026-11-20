@@ -31,7 +31,7 @@ Prints the whole job in the terminal: the live-password refusal at startup, J-10
 
     python3 server.py
 
-Open http://127.0.0.1:8765. The port is required. The desk has Today, Work order, Material, Operations, Quality, Trace, Message log, and Inbox. Reset job returns the ledger to 500 kg and turns both switches off. Stop the server with Ctrl+C.
+Open http://127.0.0.1:8765. The port is required. The desk has Today, Work order, Material, Operations, Quality, Trace, Message log, and Inbox. Reset job returns the ledger to 500 kg and turns both switches off, moving processed files in `inbox/done/` and `inbox/results/` to a timestamped folder in `inbox/archive/` when the message log is cleared. Stop the server with Ctrl+C.
 
 ## 5. Copy samples, then Read inbox
 
