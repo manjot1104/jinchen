@@ -1,3 +1,5 @@
+import contextlib
+import io
 import json
 import shutil
 import tempfile
@@ -156,6 +158,27 @@ class ConfigTests(unittest.TestCase):
         lines = [call.args[0] for call in printed.call_args_list if call.args]
         self.assertEqual(lines, [MODE_SENTENCE, "prove.py did not run"])
         self.assertFalse(any(str(line).startswith("TC-02") for line in lines))
+
+    def test_password_never_leaks_in_config_error_or_prove_output(self):
+        import prove
+        secret = "top-secret-password"
+        for mode in ("test", "demo"):
+            with tempfile.TemporaryDirectory() as temp:
+                path = write_config(temp, mode, secret)
+                with self.assertRaises(ConfigError) as exc_caught:
+                    load_config(path)
+                self.assertNotIn(secret, str(exc_caught.exception))
+
+                stdout, stderr = io.StringIO(), io.StringIO()
+                with mock.patch.object(inbox, "CONFIG_PATH", path), \
+                     contextlib.redirect_stdout(stdout), \
+                     contextlib.redirect_stderr(stderr):
+                    with self.assertRaises(SystemExit) as exit_caught:
+                        prove.main()
+                self.assertEqual(exit_caught.exception.code, 1)
+                self.assertNotIn(secret, stdout.getvalue())
+                self.assertNotIn(secret, stderr.getvalue())
+                self.assertNotIn("TC-02", stdout.getvalue())
 
     def test_validate_config_uses_source_neutral_message_for_non_dict(self):
         with self.assertRaises(ConfigError) as caught:
