@@ -42,7 +42,7 @@ A replay must never move stock twice. This is how to show it:
 1. Read the nine samples once (Inbox: **Copy samples**, then **Read inbox**). The tiles read raw 384, hold 96, entries 7.
 2. Copy one file back from `inbox/done/` to `inbox/in/`, for example `08-receipt-C-1.json`.
 3. Press **Read inbox**. The result is Posted with E-DUP and document STE-0006. Hold stays 96 and there are still 7 entries.
-4. `inbox/results/08-receipt-C-1.json` is overwritten with the E-DUP result. That is expected.
+4. `inbox/results/08-receipt-C-1.json` is overwritten with the E-DUP result, while `inbox/done/` keeps both `08-receipt-C-1.json` and `08-receipt-C-1.dup1.json`.
 
 Replay on the desk: **Send J-100 again**, **Send R-1 again** and **Send C-1 again** do the same from buttons.
 
