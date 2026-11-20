@@ -47,7 +47,10 @@ class Desk:
         ]
         self.switch_a = False
         self.switch_b = False
-        self.released = False
+        self.released = any(
+            getattr(row, "kind", "") == "release" and getattr(row, "status", "") == "Sent"
+            for row in self.connector.log
+        )
 
     def reset(self):
         cleared = True
@@ -69,7 +72,7 @@ class Desk:
         msg = (
             "Job reset. The message log was cleared."
             if cleared
-            else "Job reset. The message log could not be cleared."
+            else "Job reset. The message log could not be cleared. A restart will bring the old state back."
         )
         self.attempts.append({
             "id": "reset",
@@ -125,17 +128,39 @@ class Desk:
                 "document": "",
                 "message": "Switch A is on. Logged only. Stock was not posted. Turning Switch A off does not post the queue.",
             }
-            self.connector._log(
-                (message or {}).get("id") or attempt_id,
-                (message or {}).get("work_order") or "",
-                kind,
-                "Queued",
-                "",
-                "",
-                drop_log=False,
-                quantities=None,
-                attempt_id=attempt_id,
+            should_log = True
+            last_for_attempt = next(
+                (r for r in reversed(self.connector.log) if getattr(r, "attempt_id", "") == attempt_id),
+                None,
             )
+            if last_for_attempt and getattr(last_for_attempt, "status", "") == "Queued":
+                should_log = False
+
+            if should_log:
+                if hasattr(self.connector, "record_attempt"):
+                    self.connector.record_attempt(
+                        (message or {}).get("id") or attempt_id,
+                        (message or {}).get("work_order") or "",
+                        kind,
+                        "Queued",
+                        "",
+                        "",
+                        drop_log=False,
+                        quantities=None,
+                        attempt_id=attempt_id,
+                    )
+                else:
+                    self.connector._log(
+                        (message or {}).get("id") or attempt_id,
+                        (message or {}).get("work_order") or "",
+                        kind,
+                        "Queued",
+                        "",
+                        "",
+                        drop_log=False,
+                        quantities=None,
+                        attempt_id=attempt_id,
+                    )
             self.attempts.append(row)
             return row
         # Work on a copy. For a catalog button, message is ACTIONS[...]["message"],
@@ -209,17 +234,30 @@ class Desk:
                 "document": "",
                 "message": "WO-2401 release was recorded on this desk. Jinchen was not called.",
             }
-        self.connector._log(
-            "WO-2401",
-            "WO-2401",
-            "release",
-            row["status"],
-            row["code"],
-            row["document"],
-            drop_log=False,
-            quantities=None,
-            attempt_id="release",
-        )
+        if hasattr(self.connector, "record_attempt"):
+            self.connector.record_attempt(
+                "WO-2401",
+                "WO-2401",
+                "release",
+                row["status"],
+                row["code"],
+                row["document"],
+                drop_log=False,
+                quantities=None,
+                attempt_id="release",
+            )
+        else:
+            self.connector._log(
+                "WO-2401",
+                "WO-2401",
+                "release",
+                row["status"],
+                row["code"],
+                row["document"],
+                drop_log=False,
+                quantities=None,
+                attempt_id="release",
+            )
         self.attempts.append(row)
         return row
 

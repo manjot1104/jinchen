@@ -1,5 +1,6 @@
 """File-based inbox helpers for the Jinchen POC."""
 
+import inspect
 import json
 import shutil
 from pathlib import Path
@@ -129,27 +130,50 @@ def read_next(
             "message": QUEUED_MESSAGE,
         }
         move_to_done = False
-        if hasattr(connector, "_log"):
-            connector._log(
-                message.get("id") or "",
-                message.get("work_order") or "",
-                message.get("kind") or "",
-                "Queued",
-                "",
-                "",
-                drop_log=False,
-                quantities=None,
-                attempt_id=source.name,
+        should_log = True
+        if hasattr(connector, "log") and connector.log:
+            last_for_attempt = next(
+                (row for row in reversed(connector.log) if getattr(row, "attempt_id", "") == source.name),
+                None,
             )
+            if last_for_attempt and getattr(last_for_attempt, "status", "") == "Queued":
+                should_log = False
+
+        if should_log:
+            if hasattr(connector, "record_attempt"):
+                connector.record_attempt(
+                    message.get("id") or "",
+                    message.get("work_order") or "",
+                    message.get("kind") or "",
+                    "Queued",
+                    "",
+                    "",
+                    drop_log=False,
+                    quantities=None,
+                    attempt_id=source.name,
+                )
+            elif hasattr(connector, "_log"):
+                connector._log(
+                    message.get("id") or "",
+                    message.get("work_order") or "",
+                    message.get("kind") or "",
+                    "Queued",
+                    "",
+                    "",
+                    drop_log=False,
+                    quantities=None,
+                    attempt_id=source.name,
+                )
     else:
         try:
-            try:
+            params = inspect.signature(connector.process).parameters
+            if "attempt_id" in params:
                 result = connector.process(
                     message,
                     drop_log="log-fails" in source.name,
                     attempt_id=source.name,
                 )
-            except TypeError:
+            else:
                 result = connector.process(
                     message,
                     drop_log="log-fails" in source.name,

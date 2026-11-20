@@ -429,7 +429,7 @@ class LogTests(unittest.TestCase):
             log_file.write_text(json.dumps(bad_row) + "\n", encoding="utf-8")
 
             desk = Desk(log_path=str(log_file))
-            self.assertEqual(len(desk.connector.log), 0)
+            self.assertEqual(len(desk.connector.log), 1)
             self.assertEqual(len(desk.connector.ledger.entries), 0)
 
     def test_review_reset_builds_connector_without_log_path_when_clearing_fails(self):
@@ -445,7 +445,10 @@ class LogTests(unittest.TestCase):
                 desk.reset()
                 self.assertIsNone(desk.connector.log_path)
                 self.assertEqual(len(desk.connector.log), 0)
-                self.assertEqual(desk.attempts[0]["message"], "Job reset. The message log could not be cleared.")
+                self.assertEqual(
+                    desk.attempts[0]["message"],
+                    "Job reset. The message log could not be cleared. A restart will bring the old state back.",
+                )
 
     def test_review_queued_and_release_logged_and_restored(self):
         """Review point 6: Switch A Queued rows and release rows are logged and restored."""
@@ -462,6 +465,97 @@ class LogTests(unittest.TestCase):
             self.assertEqual(desk2.attempts[0]["status"], "Queued")
             self.assertEqual(desk2.attempts[1]["id"], "release")
             self.assertEqual(desk2.attempts[1]["status"], "Sent")
+
+    def test_switch_a_duplicate_queued_rows_skipped(self):
+        """Third review: Repeated reads with Switch A do not duplicate Queued rows in log."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            inbox_dir = root / "in"
+            done_dir = root / "done"
+            results_dir = root / "results"
+            inbox_dir.mkdir(parents=True)
+            log_file = root / "log.jsonl"
+
+            f = inbox_dir / "01-issue.json"
+            f.write_text(json.dumps(msg_issue()), encoding="utf-8")
+
+            c = Connector(log_path=str(log_file))
+            from connector.inbox import read_all
+            read_all(c, switch_a=True, inbox_dir=inbox_dir, done_dir=done_dir, results_dir=results_dir)
+            self.assertEqual(len(c.log), 1)
+
+            # Second read with Switch A
+            read_all(c, switch_a=True, inbox_dir=inbox_dir, done_dir=done_dir, results_dir=results_dir)
+            self.assertEqual(len(c.log), 1)
+
+            lines = [l for l in log_file.read_text(encoding="utf-8").splitlines() if l.strip()]
+            self.assertEqual(len(lines), 1)
+
+    def test_ste_number_restored_from_results_when_log_dropped(self):
+        """Third review: When a stock entry's log write was dropped, STE number is restored from results."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            inbox_dir = root / "in"
+            done_dir = root / "done"
+            results_dir = root / "results"
+            inbox_dir.mkdir(parents=True)
+            log_file = root / "log.jsonl"
+
+            f = inbox_dir / "01-issue-J-100-log-fails.json"
+            f.write_text(json.dumps(msg_issue()), encoding="utf-8")
+
+            c = Connector(log_path=str(log_file), results_dir=str(results_dir))
+            from connector.inbox import read_all
+            read_all(c, inbox_dir=inbox_dir, done_dir=done_dir, results_dir=results_dir)
+
+            self.assertTrue(not log_file.exists() or len(log_file.read_text(encoding="utf-8").strip()) == 0)
+            res = json.loads((results_dir / "01-issue-J-100-log-fails.json").read_text(encoding="utf-8"))
+            self.assertEqual(res["document"], "STE-0001")
+
+            c2 = Connector(log_path=str(log_file), results_dir=str(results_dir))
+            self.assertEqual(c2.ledger._n, 1)
+
+            m2 = msg_issue()
+            m2["id"] = "J-200"
+            res2 = c2.process(m2)
+            self.assertEqual(res2.document, "STE-0002")
+
+    def test_released_state_restored_from_log_on_desk_restart(self):
+        """Third review: Desk.released starts as True if a release was recorded in the log."""
+        with tempfile.TemporaryDirectory() as temp:
+            log_file = Path(temp) / "log.jsonl"
+            desk = Desk(log_path=str(log_file))
+            self.assertFalse(desk.released)
+            desk.release()
+            self.assertTrue(desk.released)
+
+            desk2 = Desk(log_path=str(log_file))
+            self.assertTrue(desk2.released)
+
+    def test_typeerror_during_process_is_not_retried_in_inbox(self):
+        """Third review: TypeError raised inside process is not caught and retried."""
+        from connector.inbox import read_next
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            inbox_dir = root / "in"
+            done_dir = root / "done"
+            results_dir = root / "results"
+            inbox_dir.mkdir(parents=True)
+
+            f = inbox_dir / "bad-batch.json"
+            f.write_text('{"kind": "receipt", "id": "R-1", "work_order": "WO-2401", "batch": ["list_is_bad"]}', encoding="utf-8")
+
+            c = Connector()
+            calls = []
+
+            def spy_process(msg, drop_log=False, attempt_id=""):
+                calls.append(msg)
+                raise TypeError("dict key error simulation")
+
+            c.process = spy_process
+            res = read_next(c, inbox_dir=inbox_dir, done_dir=done_dir, results_dir=results_dir, source_file=f)
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(res["code"], "E-ITEM")
 
 
 if __name__ == "__main__":
