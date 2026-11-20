@@ -14,10 +14,12 @@ REPO_INBOX = PROJECT / "inbox"
 CHECKS = ("02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12", "13")
 passed = 0
 failed = 0
+ran_checks = []
 
 
 def check(number, description, test):
     global passed, failed
+    ran_checks.append(number)
     try:
         test()
         passed += 1
@@ -78,15 +80,19 @@ def run_folder(src_dir, config=None):
 
 
 def main():
-    global passed, failed
+    global passed, failed, ran_checks
     passed = 0
     failed = 0
+    ran_checks = []
     try:
         config = load_config()
     except ConfigError as exc:
         print(str(exc))
         print("prove.py did not run")
         raise SystemExit(1)
+
+    weight = config["weight"]
+    print(f"Config weight: kg_per_piece={weight['kg_per_piece']}, loss_allowance={weight['loss_allowance']}")
 
     def tc02():
         try:
@@ -95,12 +101,12 @@ def main():
             pass
         else:
             raise AssertionError("live password was not refused")
-        c = Connector()
-        equal(c.kg(), {"raw": 500.0, "wip": 0.0}, "initial stock")
+        tc02_connector = Connector(weight=weight)
+        equal(tc02_connector.kg(), {"raw": 500.0, "wip": 0.0}, "initial stock")
 
     check("02", "live password refused; empty-password test mode starts", tc02)
 
-    c = Connector()
+    c = Connector(weight=weight)
     first_issue = {}
 
     def tc03():
@@ -170,7 +176,7 @@ def main():
         equal(c.kg(), {"raw": 384.0, "wip": 116.0}, "raw/WIP stock")
         equal(len(c.ledger.entries), 5, "entries after dispositions")
 
-        control = Connector()
+        control = Connector(weight=weight)
         control.ledger.open_capa("D-CONTROL", "WO-2401", "manual-check")
         equal(control.ledger.capa, 1, "manual CAPA count")
         equal(
@@ -301,7 +307,16 @@ def main():
 
     check("13", "eight bad example files are refused without moving stock", tc13)
 
-    if failed == 0 and passed == len(CHECKS):
+    missing = [item for item in CHECKS if item not in ran_checks]
+    unexpected = [item for item in ran_checks if item not in CHECKS]
+    duplicates = [item for item in set(ran_checks) if ran_checks.count(item) > 1]
+    if (
+        failed == 0
+        and not missing
+        and not unexpected
+        and not duplicates
+        and len(ran_checks) == len(CHECKS)
+    ):
         print("ALL PASS")
     else:
         print(f"NOT PASS: {passed} passed, {failed} failed")

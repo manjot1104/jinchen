@@ -4,9 +4,12 @@ import json
 import os
 import shutil
 import tempfile
+import threading
 from pathlib import Path
 
 from connector.poc import DEFAULT_WEIGHT, ConfigError, require_test_mode
+
+_RESULT_LOCK = threading.Lock()
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -19,7 +22,7 @@ CONFIG_PATH = PROJECT_ROOT / "config.json"
 def _validate_config(data):
     """Validate a config dict and return normalized mode, password, and weight."""
     if not isinstance(data, dict):
-        raise ConfigError("config.json is not a valid JSON object.")
+        raise ConfigError("Config is not a valid JSON object.")
 
     mode = data.get("mode")
     live_password = data.get("live_password") or ""
@@ -93,11 +96,12 @@ def list_inbox(inbox_dir=None):
 def _write_result_atomic(results_directory, filename, result_data):
     """Write result JSON to a temp file and atomically replace results/<filename>."""
     result_file = results_directory / filename
-    tmp_fd, tmp_name = tempfile.mkstemp(dir=results_directory, prefix=".tmp-", suffix=".json")
+    tmp_fd, tmp_name = tempfile.mkstemp(dir=results_directory, prefix=".tmp-", suffix=".tmp")
     try:
         with os.fdopen(tmp_fd, "w", encoding="utf-8") as handle:
             handle.write(json.dumps(result_data, indent=2) + "\n")
-        os.replace(tmp_name, result_file)
+        with _RESULT_LOCK:
+            os.replace(tmp_name, result_file)
     except Exception:
         if os.path.exists(tmp_name):
             os.unlink(tmp_name)
@@ -117,14 +121,15 @@ def _move_to_done_unique(source, done_directory):
         except FileExistsError:
             counter += 1
             continue
+        os.close(fd)
         try:
-            with os.fdopen(fd, "wb") as handle:
-                handle.write(source.read_bytes())
+            os.replace(source, candidate)
         except Exception:
-            if candidate.exists():
+            try:
                 candidate.unlink()
+            except OSError:
+                pass
             raise
-        source.unlink()
         return candidate
 
 
@@ -224,9 +229,14 @@ def read_all(
     touched. If a config dict is also passed, it is validated as well so a
     stale or invalid dict cannot bypass the safety gate.
     """
-    load_config(config_path)
+    current = load_config(config_path)
     if config is not None:
         _validate_config(config)
+    if hasattr(connector, "weight") and _weight(connector.weight) != current["weight"]:
+        raise ConfigError(
+            "Connector weight does not match the current config.json. "
+            "Restart the server before reading the inbox."
+        )
     files = list_inbox(inbox_dir)
     results = []
 

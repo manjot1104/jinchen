@@ -1,4 +1,5 @@
 import json
+import os
 import shutil
 import tempfile
 import threading
@@ -513,6 +514,135 @@ class InboxTests(unittest.TestCase):
             self.assertTrue((inbox / ISSUE_FILE).exists())
             self.assertFalse(done.exists())
             self.assertFalse(results.exists())
+
+    def test_reset_and_reread_nine_samples_reconciles_without_14_results(self):
+        with tempfile.TemporaryDirectory() as temp:
+            inbox, done, results = temp_inbox(Path(temp))
+            for sample in sorted(SAMPLES.glob("*.json")):
+                shutil.copy2(sample, inbox / sample.name)
+            first_connector = Connector()
+            read_all(first_connector, inbox_dir=inbox, done_dir=done, results_dir=results)
+
+            # Simulate desk reset (fresh ledger) while inbox/results retains prior run
+            reset_connector = Connector()
+            for sample in sorted(SAMPLES.glob("*.json")):
+                shutil.copy2(sample, inbox / sample.name)
+            read_all(reset_connector, inbox_dir=inbox, done_dir=done, results_dir=results)
+
+            self.assertEqual(len(list(results.glob("*.json"))), 9)
+            self.assertEqual(len(list(done.glob("*.json"))), 18)
+            self.assertEqual(
+                reconcile(reset_connector, results),
+                {
+                    "stock_results": 7,
+                    "entries": 7,
+                    "missing_entry": [],
+                    "missing_result": [],
+                    "unreadable": [],
+                },
+            )
+
+    def test_failed_move_to_done_cleans_placeholder_and_preserves_source(self):
+        with tempfile.TemporaryDirectory() as temp:
+            inbox, done, results = temp_inbox(Path(temp))
+            shutil.copy2(SAMPLES / ISSUE_FILE, inbox / ISSUE_FILE)
+            original_bytes = (inbox / ISSUE_FILE).read_bytes()
+            real_replace = os.replace
+
+            def fail_done_replace(src, dst):
+                if Path(dst).parent == done:
+                    raise PermissionError("simulated Windows lock")
+                return real_replace(src, dst)
+
+            with mock.patch("connector.inbox.os.replace", side_effect=fail_done_replace):
+                with self.assertRaises(PermissionError):
+                    read_next(Connector(), inbox_dir=inbox, done_dir=done, results_dir=results)
+
+            self.assertTrue((inbox / ISSUE_FILE).exists())
+            self.assertEqual((inbox / ISSUE_FILE).read_bytes(), original_bytes)
+            self.assertEqual(list(done.iterdir()), [])
+
+    def test_result_write_uses_tmp_suffix_and_cleans_up_on_failure(self):
+        with tempfile.TemporaryDirectory() as temp:
+            inbox, done, results = temp_inbox(Path(temp))
+            shutil.copy2(SAMPLES / ISSUE_FILE, inbox / ISSUE_FILE)
+
+            read_next(Connector(), inbox_dir=inbox, done_dir=done, results_dir=results)
+            self.assertEqual([p.name for p in results.iterdir()], [ISSUE_FILE])
+
+            shutil.copy2(SAMPLES / "02-return-R-1.json", inbox / "02-return-R-1.json")
+            with mock.patch("connector.inbox.os.replace", side_effect=OSError("disk full")):
+                with self.assertRaises(OSError):
+                    read_next(Connector(), inbox_dir=inbox, done_dir=done, results_dir=results)
+
+            self.assertEqual([p.name for p in results.iterdir()], [ISSUE_FILE])
+            self.assertEqual(list(results.glob("*.tmp")), [])
+
+    def test_nine_queued_samples_read_three_times_keep_nine_results(self):
+        with tempfile.TemporaryDirectory() as temp:
+            inbox, done, results = temp_inbox(Path(temp))
+            for sample in sorted(SAMPLES.glob("*.json")):
+                shutil.copy2(sample, inbox / sample.name)
+            connector = Connector()
+
+            for _ in range(3):
+                read_all(
+                    connector, switch_a=True, inbox_dir=inbox, done_dir=done, results_dir=results
+                )
+
+            self.assertEqual(len(list(results.glob("*.json"))), 9)
+            self.assertEqual(list(results.glob("*.tmp")), [])
+
+    def test_read_all_refuses_when_config_weight_changes_after_connector_creation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            inbox, done, results = temp_inbox(root)
+            shutil.copy2(SAMPLES / ISSUE_FILE, inbox / ISSUE_FILE)
+            cfg_path = root / "config.json"
+            cfg_path.write_text(json.dumps({
+                "mode": "test",
+                "live_password": "",
+                "weight": {"kg_per_piece": 1.5, "loss_allowance": 0.05},
+            }))
+            connector = Connector(weight={"kg_per_piece": 1.2, "loss_allowance": 0.05})
+
+            with self.assertRaises(ConfigError) as caught:
+                read_all(
+                    connector,
+                    inbox_dir=inbox,
+                    done_dir=done,
+                    results_dir=results,
+                    config_path=cfg_path,
+                )
+
+            self.assertIn("Connector weight does not match", str(caught.exception))
+            self.assertTrue((inbox / ISSUE_FILE).exists())
+            self.assertFalse(done.exists())
+            self.assertFalse(results.exists())
+
+    def test_read_all_allows_equivalent_normalized_weight(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            inbox, done, results = temp_inbox(root)
+            shutil.copy2(SAMPLES / ISSUE_FILE, inbox / ISSUE_FILE)
+            cfg_path = root / "config.json"
+            cfg_path.write_text(json.dumps({
+                "mode": "test",
+                "live_password": "",
+                "weight": {"kg_per_piece": 2, "loss_allowance": 0},
+            }))
+            connector = Connector(weight={"kg_per_piece": 2.0, "loss_allowance": 0.0})
+
+            outcomes = read_all(
+                connector,
+                inbox_dir=inbox,
+                done_dir=done,
+                results_dir=results,
+                config_path=cfg_path,
+            )
+
+            self.assertEqual(len(outcomes), 1)
+            self.assertEqual(outcomes[0]["status"], "Posted")
 
 
 if __name__ == "__main__":

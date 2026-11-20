@@ -157,9 +157,23 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(lines, [MODE_SENTENCE, "prove.py did not run"])
         self.assertFalse(any(str(line).startswith("TC-02") for line in lines))
 
-    def test_prove_main_loads_config_once_and_propagates_it(self):
+    def test_validate_config_uses_source_neutral_message_for_non_dict(self):
+        with self.assertRaises(ConfigError) as caught:
+            inbox._validate_config(["not", "a", "dict"])
+        self.assertEqual(str(caught.exception), "Config is not a valid JSON object.")
+
+    def test_invalid_json_file_keeps_file_specific_error_message(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "config.json"
+            path.write_text("{not-json", encoding="utf-8")
+            with self.assertRaises(ConfigError) as caught:
+                load_config(path)
+        self.assertEqual(str(caught.exception), "config.json is not a valid JSON object.")
+
+    def test_prove_main_propagates_validated_config_and_revalidates_on_read_all(self):
         import prove
-        real_load = load_config
+        real_prove_load = prove.load_config
+        real_inbox_load = inbox.load_config
         real_read_all = read_all
         configs_passed = []
 
@@ -170,12 +184,14 @@ class ConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             path = write_config(temp, "test", "")
             with mock.patch.object(inbox, "CONFIG_PATH", path), \
-                 mock.patch.object(prove, "load_config", wraps=real_load) as mocked_load, \
+                 mock.patch.object(prove, "load_config", wraps=real_prove_load) as mocked_prove_load, \
+                 mock.patch.object(inbox, "load_config", wraps=real_inbox_load) as mocked_inbox_load, \
                  mock.patch.object(prove, "read_all", side_effect=spy_read_all), \
                  mock.patch("builtins.print"):
                 prove.main()
 
-        self.assertEqual(mocked_load.call_count, 1)
+        self.assertEqual(mocked_prove_load.call_count, 1)
+        self.assertEqual(mocked_inbox_load.call_count, 2)
         self.assertEqual(len(configs_passed), 2)
         for cfg in configs_passed:
             self.assertIsNotNone(cfg)
@@ -232,12 +248,68 @@ class ConfigTests(unittest.TestCase):
         self.assertIn("TC-12 FAIL", output)
         self.assertNotIn("ALL PASS", output)
 
+    def test_prove_main_passes_with_consistent_custom_weight(self):
+        import prove
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "config.json"
+            path.write_text(json.dumps({
+                "mode": "test",
+                "live_password": "",
+                "weight": {"kg_per_piece": 1.5, "loss_allowance": 0.30},
+            }))
+            with mock.patch.object(inbox, "CONFIG_PATH", path), \
+                 mock.patch("builtins.print") as printed:
+                prove.main()
+        output = "\n".join(str(call.args[0]) for call in printed.call_args_list if call.args)
+        self.assertIn("Config weight: kg_per_piece=1.5, loss_allowance=0.3", output)
+        self.assertIn("ALL PASS", output)
+
     def test_prove_main_fails_if_a_registered_check_is_missing(self):
         import prove
         with tempfile.TemporaryDirectory() as temp:
             path = write_config(temp, "test", "")
             with mock.patch.object(inbox, "CONFIG_PATH", path), \
                  mock.patch.object(prove, "CHECKS", prove.CHECKS + ("14",)), \
+                 mock.patch("builtins.print") as printed:
+                with self.assertRaises(SystemExit) as caught:
+                    prove.main()
+        self.assertEqual(caught.exception.code, 1)
+        lines = [str(call.args[0]) for call in printed.call_args_list if call.args]
+        self.assertNotIn("ALL PASS", lines)
+        self.assertTrue(any(line.startswith("NOT PASS:") for line in lines))
+
+    def test_prove_main_fails_if_an_unexpected_check_id_runs(self):
+        import prove
+        real_check = prove.check
+
+        def renumbered_check(number, description, test):
+            mapped = "99" if number == "13" else number
+            return real_check(mapped, description, test)
+
+        with tempfile.TemporaryDirectory() as temp:
+            path = write_config(temp, "test", "")
+            with mock.patch.object(inbox, "CONFIG_PATH", path), \
+                 mock.patch.object(prove, "check", side_effect=renumbered_check), \
+                 mock.patch("builtins.print") as printed:
+                with self.assertRaises(SystemExit) as caught:
+                    prove.main()
+        self.assertEqual(caught.exception.code, 1)
+        lines = [str(call.args[0]) for call in printed.call_args_list if call.args]
+        self.assertNotIn("ALL PASS", lines)
+        self.assertTrue(any(line.startswith("NOT PASS:") for line in lines))
+
+    def test_prove_main_fails_if_a_check_id_runs_twice(self):
+        import prove
+        real_check = prove.check
+
+        def duplicate_check(number, description, test):
+            mapped = "12" if number == "13" else number
+            return real_check(mapped, description, test)
+
+        with tempfile.TemporaryDirectory() as temp:
+            path = write_config(temp, "test", "")
+            with mock.patch.object(inbox, "CONFIG_PATH", path), \
+                 mock.patch.object(prove, "check", side_effect=duplicate_check), \
                  mock.patch("builtins.print") as printed:
                 with self.assertRaises(SystemExit) as caught:
                     prove.main()
