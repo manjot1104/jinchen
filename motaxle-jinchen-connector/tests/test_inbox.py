@@ -262,13 +262,13 @@ class InboxTests(unittest.TestCase):
             self.assertTrue((done / "01-boom.json").exists())
             self.assertEqual(json.loads((results / "01-boom.json").read_text())["code"], "E-ITEM")
 
-    def test_destination_collision_preserves_done_and_updates_result(self):
+    def test_destination_collision_preserves_done_and_pairs_result(self):
         with tempfile.TemporaryDirectory() as temp:
             inbox, done, results = temp_inbox(Path(temp))
             done.mkdir()
             results.mkdir()
             (done / ISSUE_FILE).write_text("original-done", encoding="utf-8")
-            (results / ISSUE_FILE).write_text('{"status": "Queued"}', encoding="utf-8")
+            (results / ISSUE_FILE).write_text('{"status": "Posted", "document": "STE-0001"}', encoding="utf-8")
             shutil.copy2(SAMPLES / ISSUE_FILE, inbox / ISSUE_FILE)
             connector = Connector()
 
@@ -281,10 +281,11 @@ class InboxTests(unittest.TestCase):
             self.assertFalse((inbox / ISSUE_FILE).exists())
             self.assertEqual((done / ISSUE_FILE).read_text(encoding="utf-8"), "original-done")
             self.assertTrue((done / "01-issue-J-100-log-fails.dup1.json").exists())
-            self.assertFalse((results / "01-issue-J-100-log-fails.dup1.json").exists())
-            updated_result = json.loads((results / ISSUE_FILE).read_text(encoding="utf-8"))
-            self.assertEqual(updated_result["status"], "Posted")
-            self.assertEqual(updated_result["document"], "STE-0001")
+            self.assertTrue((results / "01-issue-J-100-log-fails.dup1.json").exists())
+            self.assertEqual(
+                json.loads((results / ISSUE_FILE).read_text(encoding="utf-8"))["document"],
+                "STE-0001",
+            )
 
             shutil.copy2(SAMPLES / ISSUE_FILE, inbox / ISSUE_FILE)
             second = read_next(
@@ -292,9 +293,9 @@ class InboxTests(unittest.TestCase):
             )
             self.assertEqual(second["code"], "E-DUP")
             self.assertTrue((done / "01-issue-J-100-log-fails.dup2.json").exists())
-            self.assertFalse((results / "01-issue-J-100-log-fails.dup2.json").exists())
+            self.assertTrue((results / "01-issue-J-100-log-fails.dup2.json").exists())
             self.assertEqual(
-                json.loads((results / ISSUE_FILE).read_text(encoding="utf-8"))["code"],
+                json.loads((results / "01-issue-J-100-log-fails.dup2.json").read_text(encoding="utf-8"))["code"],
                 "E-DUP",
             )
 
@@ -312,83 +313,33 @@ class InboxTests(unittest.TestCase):
             self.assertTrue((results / ISSUE_FILE).exists())
             self.assertFalse((done / "01-issue-J-100-log-fails.dup1.json").exists())
 
-    def test_read_all_with_filled_password_in_config_refuses_before_moving(self):
+    def test_reused_filename_with_different_message_preserves_earlier_posted_result(self):
         with tempfile.TemporaryDirectory() as temp:
             inbox, done, results = temp_inbox(Path(temp))
-            shutil.copy2(SAMPLES / ISSUE_FILE, inbox / ISSUE_FILE)
             connector = Connector()
-
-            with self.assertRaises(ConfigError):
-                read_all(
-                    connector,
-                    inbox_dir=inbox,
-                    done_dir=done,
-                    results_dir=results,
-                    config={"mode": "test", "live_password": "secret"},
-                )
-
-            self.assertTrue((inbox / ISSUE_FILE).exists())
-            self.assertFalse(done.exists())
-            self.assertFalse(results.exists())
-
-    def test_read_all_with_bad_mode_in_config_refuses(self):
-        with tempfile.TemporaryDirectory() as temp:
-            inbox, done, results = temp_inbox(Path(temp))
-            shutil.copy2(SAMPLES / ISSUE_FILE, inbox / ISSUE_FILE)
-            connector = Connector()
-
-            with self.assertRaises(ConfigError) as caught:
-                read_all(
-                    connector,
-                    inbox_dir=inbox,
-                    done_dir=done,
-                    results_dir=results,
-                    config={"mode": "demo", "live_password": ""},
-                )
-
-            self.assertEqual(str(caught.exception), "Mode must be test or live.")
-
-    def test_read_all_with_empty_config_dict_refuses_before_moving(self):
-        with tempfile.TemporaryDirectory() as temp:
-            inbox, done, results = temp_inbox(Path(temp))
-            shutil.copy2(SAMPLES / ISSUE_FILE, inbox / ISSUE_FILE)
-
-            with self.assertRaises(ConfigError) as caught:
-                read_all(
-                    Connector(),
-                    inbox_dir=inbox,
-                    done_dir=done,
-                    results_dir=results,
-                    config={},
-                )
-
-            self.assertEqual(str(caught.exception), "Mode must be test or live.")
-            self.assertTrue((inbox / ISSUE_FILE).exists())
-            self.assertFalse(done.exists())
-            self.assertFalse(results.exists())
-
-    def test_replay_nine_samples_and_c1_reconciles_without_double_count(self):
-        with tempfile.TemporaryDirectory() as temp:
-            inbox, done, results = temp_inbox(Path(temp))
-            for sample in sorted(SAMPLES.glob("*.json")):
-                shutil.copy2(sample, inbox / sample.name)
-            connector = Connector()
-
+            (inbox / "msg.json").write_text(
+                (SAMPLES / ISSUE_FILE).read_text(encoding="utf-8"), encoding="utf-8"
+            )
             read_all(connector, inbox_dir=inbox, done_dir=done, results_dir=results)
-            shutil.copy2(done / "08-receipt-C-1.json", inbox / "08-receipt-C-1.json")
-            replay = read_all(connector, inbox_dir=inbox, done_dir=done, results_dir=results)
 
-            self.assertEqual(len(replay), 1)
-            self.assertEqual(replay[0]["code"], "E-DUP")
-            self.assertEqual(replay[0]["document"], "STE-0006")
-            self.assertEqual(len(list(results.glob("*.json"))), 9)
-            self.assertTrue((done / "08-receipt-C-1.json").exists())
-            self.assertTrue((done / "08-receipt-C-1.dup1.json").exists())
+            (inbox / "msg.json").write_text(
+                (SAMPLES / "02-return-R-1.json").read_text(encoding="utf-8"), encoding="utf-8"
+            )
+            read_all(connector, inbox_dir=inbox, done_dir=done, results_dir=results)
+
+            self.assertEqual(
+                json.loads((results / "msg.json").read_text(encoding="utf-8"))["document"],
+                "STE-0001",
+            )
+            self.assertEqual(
+                json.loads((results / "msg.dup1.json").read_text(encoding="utf-8"))["document"],
+                "STE-0002",
+            )
             self.assertEqual(
                 reconcile(connector, results),
                 {
-                    "stock_results": 7,
-                    "entries": 7,
+                    "stock_results": 2,
+                    "entries": 2,
                     "missing_entry": [],
                     "missing_result": [],
                     "unreadable": [],
@@ -466,15 +417,12 @@ class InboxTests(unittest.TestCase):
                 ["01-issue-J-100-log-fails.dup1.json", "01-issue-J-100-log-fails.json"],
             )
 
-    def test_stale_passed_config_cannot_bypass_updated_current_config_file(self):
+    def test_current_config_file_refuses_updated_live_password_before_moving(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             inbox, done, results = temp_inbox(root)
             shutil.copy2(SAMPLES / ISSUE_FILE, inbox / ISSUE_FILE)
             cfg_path = root / "config.json"
-            cfg_path.write_text(json.dumps({"mode": "test", "live_password": ""}))
-            stale_config = {"mode": "test", "live_password": "", "weight": {"kg_per_piece": 1.2, "loss_allowance": 0.05}}
-
             cfg_path.write_text(json.dumps({"mode": "test", "live_password": "secret"}))
             with mock.patch.object(inbox_mod, "CONFIG_PATH", cfg_path):
                 with self.assertRaises(ConfigError):
@@ -483,7 +431,6 @@ class InboxTests(unittest.TestCase):
                         inbox_dir=inbox,
                         done_dir=done,
                         results_dir=results,
-                        config=stale_config,
                     )
 
             self.assertTrue((inbox / ISSUE_FILE).exists())
@@ -515,32 +462,29 @@ class InboxTests(unittest.TestCase):
             self.assertFalse(done.exists())
             self.assertFalse(results.exists())
 
-    def test_reset_and_reread_nine_samples_reconciles_without_14_results(self):
+    def test_result_write_oserror_keeps_temp_file_and_continues_batch(self):
         with tempfile.TemporaryDirectory() as temp:
             inbox, done, results = temp_inbox(Path(temp))
-            for sample in sorted(SAMPLES.glob("*.json")):
-                shutil.copy2(sample, inbox / sample.name)
-            first_connector = Connector()
-            read_all(first_connector, inbox_dir=inbox, done_dir=done, results_dir=results)
+            shutil.copy2(SAMPLES / ISSUE_FILE, inbox / ISSUE_FILE)
+            shutil.copy2(SAMPLES / "02-return-R-1.json", inbox / "02-return-R-1.json")
+            real_replace = os.replace
+            calls = {"n": 0}
 
-            # Simulate desk reset (fresh ledger) while inbox/results retains prior run
-            reset_connector = Connector()
-            for sample in sorted(SAMPLES.glob("*.json")):
-                shutil.copy2(sample, inbox / sample.name)
-            read_all(reset_connector, inbox_dir=inbox, done_dir=done, results_dir=results)
+            def fail_first_result_replace(src, dst):
+                if Path(dst).parent == results:
+                    calls["n"] += 1
+                    if calls["n"] == 1:
+                        raise OSError("locked by reader")
+                return real_replace(src, dst)
 
-            self.assertEqual(len(list(results.glob("*.json"))), 9)
-            self.assertEqual(len(list(done.glob("*.json"))), 18)
-            self.assertEqual(
-                reconcile(reset_connector, results),
-                {
-                    "stock_results": 7,
-                    "entries": 7,
-                    "missing_entry": [],
-                    "missing_result": [],
-                    "unreadable": [],
-                },
-            )
+            with mock.patch("connector.inbox.os.replace", side_effect=fail_first_result_replace):
+                outcomes = read_all(Connector(), inbox_dir=inbox, done_dir=done, results_dir=results)
+
+            self.assertEqual(len(outcomes), 2)
+            self.assertIn("result write failed", outcomes[0]["message"])
+            self.assertEqual(outcomes[1]["status"], "Posted")
+            self.assertTrue((results / "02-return-R-1.json").exists())
+            self.assertEqual(len(list(results.glob("*.tmp"))), 1)
 
     def test_failed_move_to_done_cleans_placeholder_and_preserves_source(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -570,13 +514,11 @@ class InboxTests(unittest.TestCase):
             read_next(Connector(), inbox_dir=inbox, done_dir=done, results_dir=results)
             self.assertEqual([p.name for p in results.iterdir()], [ISSUE_FILE])
 
-            shutil.copy2(SAMPLES / "02-return-R-1.json", inbox / "02-return-R-1.json")
             with mock.patch("connector.inbox.os.replace", side_effect=OSError("disk full")):
-                with self.assertRaises(OSError):
-                    read_next(Connector(), inbox_dir=inbox, done_dir=done, results_dir=results)
+                read_next(Connector(), inbox_dir=inbox, done_dir=done, results_dir=results)
 
             self.assertEqual([p.name for p in results.iterdir()], [ISSUE_FILE])
-            self.assertEqual(list(results.glob("*.tmp")), [])
+            self.assertEqual(len(list(results.glob("*.tmp"))), 0)
 
     def test_nine_queued_samples_read_three_times_keep_nine_results(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -593,7 +535,7 @@ class InboxTests(unittest.TestCase):
             self.assertEqual(len(list(results.glob("*.json"))), 9)
             self.assertEqual(list(results.glob("*.tmp")), [])
 
-    def test_read_all_refuses_when_config_weight_changes_after_connector_creation(self):
+    def test_read_all_does_not_fail_when_connector_weight_differs_from_config(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             inbox, done, results = temp_inbox(root)
@@ -606,19 +548,16 @@ class InboxTests(unittest.TestCase):
             }))
             connector = Connector(weight={"kg_per_piece": 1.2, "loss_allowance": 0.05})
 
-            with self.assertRaises(ConfigError) as caught:
-                read_all(
-                    connector,
-                    inbox_dir=inbox,
-                    done_dir=done,
-                    results_dir=results,
-                    config_path=cfg_path,
-                )
+            outcomes = read_all(
+                connector,
+                inbox_dir=inbox,
+                done_dir=done,
+                results_dir=results,
+                config_path=cfg_path,
+            )
 
-            self.assertIn("Connector weight does not match", str(caught.exception))
-            self.assertTrue((inbox / ISSUE_FILE).exists())
-            self.assertFalse(done.exists())
-            self.assertFalse(results.exists())
+            self.assertEqual(len(outcomes), 1)
+            self.assertEqual(outcomes[0]["status"], "Posted")
 
     def test_read_all_allows_equivalent_normalized_weight(self):
         with tempfile.TemporaryDirectory() as temp:

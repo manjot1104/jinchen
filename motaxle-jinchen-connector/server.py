@@ -29,6 +29,7 @@ def whole(value):
 
 class Desk:
     def __init__(self, weight=None):
+        self._fixed_weight = weight
         self.weight = weight
         self.connector = Connector(weight=self.weight)
         self.attempts = []
@@ -37,6 +38,13 @@ class Desk:
         self.released = False
 
     def reset(self):
+        if self._fixed_weight is None:
+            try:
+                self.weight = load_config()["weight"]
+            except ConfigError:
+                pass
+        else:
+            self.weight = self._fixed_weight
         self.connector = Connector(weight=self.weight)
         self.attempts = []
         self.switch_a = False
@@ -51,13 +59,17 @@ class Desk:
 
     def read_inbox(self):
         """Read inbox files through the desk's current Switch A setting."""
-        files = list_inbox()
-        results = read_all(self.connector, switch_a=self.switch_a)
+        try:
+            pairs = read_all(self.connector, switch_a=self.switch_a, include_names=True)
+        except ConfigError as exc:
+            payload = self.payload(None)
+            payload["inbox_message"] = str(exc)
+            return payload
 
         last_result = None
-        for source, result in zip(files, results):
+        for source_name, result in pairs:
             row = {
-                "id": source.name,
+                "id": source_name,
                 "status": result["status"],
                 "code": result["code"],
                 "document": result["document"],
@@ -68,8 +80,8 @@ class Desk:
 
         payload = self.payload(last_result)
         payload["inbox_message"] = (
-            f"Read {len(results)} inbox file(s)."
-            if results
+            f"Read {len(pairs)} inbox file(s)."
+            if pairs
             else "Inbox is empty."
         )
         return payload

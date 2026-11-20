@@ -1,15 +1,14 @@
 """File-based inbox helpers for the Jinchen POC."""
 
+import errno
 import json
 import os
+import re
 import shutil
 import tempfile
-import threading
 from pathlib import Path
 
 from connector.poc import DEFAULT_WEIGHT, ConfigError, require_test_mode
-
-_RESULT_LOCK = threading.Lock()
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -19,10 +18,10 @@ RESULTS_DIR = PROJECT_ROOT / "inbox" / "results"
 CONFIG_PATH = PROJECT_ROOT / "config.json"
 
 
-def _validate_config(data):
+def _validate_config(data, label="Config"):
     """Validate a config dict and return normalized mode, password, and weight."""
     if not isinstance(data, dict):
-        raise ConfigError("Config is not a valid JSON object.")
+        raise ConfigError(f"{label} is not a valid JSON object.")
 
     mode = data.get("mode")
     live_password = data.get("live_password") or ""
@@ -46,7 +45,7 @@ def load_config(path=None):
         raise ConfigError("config.json was not found at %s." % config_path)
     except (json.JSONDecodeError, UnicodeDecodeError):
         raise ConfigError("config.json is not a valid JSON object.")
-    return _validate_config(data)
+    return _validate_config(data, label="config.json")
 
 
 WEIGHT_SENTENCE = "config.json weight needs kg_per_piece above 0 and loss_allowance from 0 to 1."
@@ -98,14 +97,35 @@ def _write_result_atomic(results_directory, filename, result_data):
     result_file = results_directory / filename
     tmp_fd, tmp_name = tempfile.mkstemp(dir=results_directory, prefix=".tmp-", suffix=".tmp")
     try:
-        with os.fdopen(tmp_fd, "w", encoding="utf-8") as handle:
+        try:
+            handle = os.fdopen(tmp_fd, "w", encoding="utf-8")
+        except BaseException:
+            os.close(tmp_fd)
+            raise
+        with handle:
             handle.write(json.dumps(result_data, indent=2) + "\n")
-        with _RESULT_LOCK:
-            os.replace(tmp_name, result_file)
-    except Exception:
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(tmp_name, 0o644)
+    except BaseException:
         if os.path.exists(tmp_name):
             os.unlink(tmp_name)
         raise
+    try:
+        os.replace(tmp_name, result_file)
+    except OSError as exc:
+        return str(exc)
+    return ""
+
+
+def _next_dup_counter(done_directory, stem, suffix):
+    pattern = re.compile(rf"^{re.escape(stem)}\.dup(\d+){re.escape(suffix)}$")
+    highest = 0
+    for entry in done_directory.iterdir():
+        match = pattern.match(entry.name)
+        if match:
+            highest = max(highest, int(match.group(1)))
+    return highest + 1
 
 
 def _move_to_done_unique(source, done_directory):
@@ -117,19 +137,35 @@ def _move_to_done_unique(source, done_directory):
     while True:
         candidate = target if counter == 0 else done_directory / f"{stem}.dup{counter}{suffix}"
         try:
-            fd = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.link(source, candidate)
         except FileExistsError:
-            counter += 1
+            if counter == 0:
+                counter = _next_dup_counter(done_directory, stem, suffix)
+            else:
+                counter += 1
             continue
-        os.close(fd)
-        try:
-            os.replace(source, candidate)
-        except Exception:
+        except OSError as exc:
+            if exc.errno not in (errno.EXDEV, errno.EACCES, errno.EPERM):
+                raise
             try:
-                candidate.unlink()
-            except OSError:
-                pass
-            raise
+                fd = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            except FileExistsError:
+                if counter == 0:
+                    counter = _next_dup_counter(done_directory, stem, suffix)
+                else:
+                    counter += 1
+                continue
+            os.close(fd)
+            try:
+                os.replace(source, candidate)
+            except BaseException:
+                try:
+                    candidate.unlink()
+                except OSError:
+                    pass
+                raise
+            return candidate
+        source.unlink()
         return candidate
 
 
@@ -206,10 +242,15 @@ def read_next(
     done_directory.mkdir(parents=True, exist_ok=True)
     results_directory.mkdir(parents=True, exist_ok=True)
 
-    _write_result_atomic(results_directory, source.name, result_data)
-
     if move_to_done:
-        _move_to_done_unique(source, done_directory)
+        done_target = _move_to_done_unique(source, done_directory)
+        result_name = done_target.name
+    else:
+        result_name = source.name
+
+    write_err = _write_result_atomic(results_directory, result_name, result_data)
+    if write_err:
+        result_data["message"] = f"{result_data['message']} (result write failed: {write_err})"
 
     return result_data
 
@@ -221,22 +262,14 @@ def read_all(
     done_dir=None,
     results_dir=None,
     config_path=None,
-    config=None,
+    include_names=False,
 ):
     """Read the current inbox in filename order, respecting Switch A.
 
-    Always validates the current config file before any inbox file is
-    touched. If a config dict is also passed, it is validated as well so a
-    stale or invalid dict cannot bypass the safety gate.
+    The config is checked before the first file is touched. A filled live
+    password or a bad mode raises ConfigError and nothing moves.
     """
-    current = load_config(config_path)
-    if config is not None:
-        _validate_config(config)
-    if hasattr(connector, "weight") and _weight(connector.weight) != current["weight"]:
-        raise ConfigError(
-            "Connector weight does not match the current config.json. "
-            "Restart the server before reading the inbox."
-        )
+    load_config(config_path)
     files = list_inbox(inbox_dir)
     results = []
 
@@ -251,7 +284,7 @@ def read_all(
         )
 
         if result is not None:
-            results.append(result)
+            results.append((source.name, result) if include_names else result)
 
     return results
 

@@ -1,10 +1,9 @@
 from contextlib import contextmanager
 import json
 from pathlib import Path
-import shutil
 import tempfile
 
-from connector.inbox import load_config, read_all
+from connector.inbox import copy_samples, load_config, read_all
 from connector.poc import ConfigError, Connector, require_test_mode
 
 PROJECT = Path(__file__).resolve().parent
@@ -63,8 +62,7 @@ def run_folder(src_dir, config=None):
         done_dir = root / "done"
         results_dir = root / "results"
         inbox_dir.mkdir()
-        for source in sorted(Path(src_dir).glob("*.json")):
-            shutil.copy2(source, inbox_dir / source.name)
+        copy_samples(inbox_dir, src_dir)
 
         weight = config.get("weight") if isinstance(config, dict) else None
         connector = Connector(weight=weight)
@@ -74,7 +72,6 @@ def run_folder(src_dir, config=None):
             inbox_dir=inbox_dir,
             done_dir=done_dir,
             results_dir=results_dir,
-            config=config,
         )
         yield connector, results, results_dir
 
@@ -307,19 +304,12 @@ def main():
 
     check("13", "eight bad example files are refused without moving stock", tc13)
 
-    missing = [item for item in CHECKS if item not in ran_checks]
-    unexpected = [item for item in ran_checks if item not in CHECKS]
-    duplicates = [item for item in set(ran_checks) if ran_checks.count(item) > 1]
-    if (
-        failed == 0
-        and not missing
-        and not unexpected
-        and not duplicates
-        and len(ran_checks) == len(CHECKS)
-    ):
+    if failed == 0 and sorted(ran_checks) == sorted(CHECKS):
         print("ALL PASS")
     else:
-        print(f"NOT PASS: {passed} passed, {failed} failed")
+        missing = sorted(set(CHECKS) - set(ran_checks))
+        unexpected = sorted(set(ran_checks) - set(CHECKS))
+        print(f"NOT PASS: {passed} passed, {failed} failed, missing={missing}, unexpected={unexpected}")
         raise SystemExit(1)
 
 

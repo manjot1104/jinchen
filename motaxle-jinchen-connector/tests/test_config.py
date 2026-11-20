@@ -175,10 +175,10 @@ class ConfigTests(unittest.TestCase):
         real_prove_load = prove.load_config
         real_inbox_load = inbox.load_config
         real_read_all = read_all
-        configs_passed = []
+        read_all_calls = []
 
         def spy_read_all(*args, **kwargs):
-            configs_passed.append(kwargs.get("config"))
+            read_all_calls.append((args, kwargs))
             return real_read_all(*args, **kwargs)
 
         with tempfile.TemporaryDirectory() as temp:
@@ -192,10 +192,10 @@ class ConfigTests(unittest.TestCase):
 
         self.assertEqual(mocked_prove_load.call_count, 1)
         self.assertEqual(mocked_inbox_load.call_count, 2)
-        self.assertEqual(len(configs_passed), 2)
-        for cfg in configs_passed:
-            self.assertIsNotNone(cfg)
-            self.assertEqual(cfg["mode"], "test")
+        self.assertEqual(len(read_all_calls), 2)
+        for args, kwargs in read_all_calls:
+            self.assertNotIn("config", kwargs)
+            self.assertEqual(args[0].weight, {"kg_per_piece": 1.2, "loss_allowance": 0.05})
 
     def test_prove_run_folder_isolates_samples_and_examples(self):
         import prove
@@ -317,6 +317,73 @@ class ConfigTests(unittest.TestCase):
         lines = [str(call.args[0]) for call in printed.call_args_list if call.args]
         self.assertNotIn("ALL PASS", lines)
         self.assertTrue(any(line.startswith("NOT PASS:") for line in lines))
+
+    def test_non_dict_config_file_raises_config_json_message(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "config.json"
+            path.write_text("[]", encoding="utf-8")
+            with self.assertRaises(ConfigError) as caught:
+                load_config(path)
+        self.assertEqual(str(caught.exception), "config.json is not a valid JSON object.")
+
+    def test_desk_read_inbox_catches_config_error_and_returns_inbox_message(self):
+        import server
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "config.json"
+            path.write_text(json.dumps({
+                "mode": "test",
+                "live_password": "",
+                "weight": {"kg_per_piece": 1.2, "loss_allowance": 0.1},
+            }))
+            with mock.patch.object(inbox, "CONFIG_PATH", path):
+                desk = server.Desk()
+                path.write_text(json.dumps({
+                    "mode": "demo",
+                    "live_password": "",
+                    "weight": {"kg_per_piece": 1.2, "loss_allowance": 0.1},
+                }))
+                payload = desk.read_inbox()
+        self.assertEqual(payload["inbox_message"], "Mode must be test or live.")
+
+    def test_desk_reset_reloads_config_weight(self):
+        import server
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "config.json"
+            path.write_text(json.dumps({
+                "mode": "test",
+                "live_password": "",
+                "weight": {"kg_per_piece": 1.2, "loss_allowance": 0.05},
+            }))
+            with mock.patch.object(inbox, "CONFIG_PATH", path):
+                desk = server.Desk()
+                self.assertEqual(desk.connector.weight, {"kg_per_piece": 1.2, "loss_allowance": 0.05})
+                path.write_text(json.dumps({
+                    "mode": "test",
+                    "live_password": "",
+                    "weight": {"kg_per_piece": 1.5, "loss_allowance": 0.1},
+                }))
+                desk.reset()
+        self.assertEqual(desk.weight, {"kg_per_piece": 1.5, "loss_allowance": 0.1})
+        self.assertEqual(desk.connector.weight, {"kg_per_piece": 1.5, "loss_allowance": 0.1})
+
+    def test_desk_read_inbox_pairs_filenames_from_read_all(self):
+        import server
+        with tempfile.TemporaryDirectory() as temp:
+            path = write_config(temp, "test", "")
+            with mock.patch.object(inbox, "CONFIG_PATH", path), \
+                 mock.patch.object(
+                     server,
+                     "read_all",
+                     return_value=[
+                         ("first.json", {"status": "POSTED", "code": "", "document": "DOC-1", "message": "ok"}),
+                         ("second.json", {"status": "FAILED", "code": "E-QTY", "document": "", "message": "bad qty"}),
+                     ],
+                 ) as mocked_read_all:
+                desk = server.Desk()
+                payload = desk.read_inbox()
+        mocked_read_all.assert_called_once_with(desk.connector, switch_a=desk.switch_a, include_names=True)
+        self.assertEqual(payload["inbox_message"], "Read 2 inbox file(s).")
+        self.assertEqual([row["id"] for row in desk.attempts], ["first.json", "second.json"])
 
 
 if __name__ == "__main__":
