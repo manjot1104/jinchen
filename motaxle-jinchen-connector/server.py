@@ -9,6 +9,7 @@ import json
 import os
 import sys
 import threading
+from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import unquote
 
@@ -63,8 +64,36 @@ class Desk:
                         pass
                 except OSError:
                     cleared = False
+        if self.log_path:
+            p = Path(self.log_path)
+            counter_file = p.with_name(".ste_counter")
+            if counter_file.exists():
+                try:
+                    counter_file.unlink()
+                except OSError:
+                    pass
+            results_dir = p.parent / "results"
+            if results_dir.is_dir():
+                for f in results_dir.glob("*.json"):
+                    try:
+                        f.unlink()
+                    except OSError:
+                        pass
+            done_dir = p.parent / "done"
+            if done_dir.is_dir():
+                for f in done_dir.glob("*.json"):
+                    try:
+                        f.unlink()
+                    except OSError:
+                        pass
         path_to_use = self.log_path if cleared else None
         self.connector = Connector(weight=self.weight, log_path=path_to_use)
+        self.connector.ledger._n = 0
+        if self.connector.counter_path and self.connector.counter_path.exists():
+            try:
+                self.connector.counter_path.unlink()
+            except OSError:
+                pass
         self.attempts = []
         self.switch_a = False
         self.switch_b = False
@@ -121,46 +150,26 @@ class Desk:
         kind = (message or {}).get("kind") or ""
         attempt_id = label or (message or {}).get("id") or kind
         if self.switch_a and kind in ("issue", "return", "disposition", "receipt"):
+            logged = self.connector.record_queued(attempt_id, message)
+            if not logged:
+                return {
+                    "id": attempt_id,
+                    "status": "Queued",
+                    "code": "",
+                    "document": "",
+                    "message": "Switch A is on. Already queued.",
+                }
+            msg = "Switch A is on. Logged only. Stock was not posted. Turning Switch A off does not post the queue."
+            if getattr(self.connector, "log_file_error", False):
+                msg = msg + " " + LOG_FILE_ERROR_MESSAGE
+                self.connector.log_file_error = False
             row = {
                 "id": attempt_id,
                 "status": "Queued",
                 "code": "",
                 "document": "",
-                "message": "Switch A is on. Logged only. Stock was not posted. Turning Switch A off does not post the queue.",
+                "message": msg,
             }
-            should_log = True
-            last_for_attempt = next(
-                (r for r in reversed(self.connector.log) if getattr(r, "attempt_id", "") == attempt_id),
-                None,
-            )
-            if last_for_attempt and getattr(last_for_attempt, "status", "") == "Queued":
-                should_log = False
-
-            if should_log:
-                if hasattr(self.connector, "record_attempt"):
-                    self.connector.record_attempt(
-                        (message or {}).get("id") or attempt_id,
-                        (message or {}).get("work_order") or "",
-                        kind,
-                        "Queued",
-                        "",
-                        "",
-                        drop_log=False,
-                        quantities=None,
-                        attempt_id=attempt_id,
-                    )
-                else:
-                    self.connector._log(
-                        (message or {}).get("id") or attempt_id,
-                        (message or {}).get("work_order") or "",
-                        kind,
-                        "Queued",
-                        "",
-                        "",
-                        drop_log=False,
-                        quantities=None,
-                        attempt_id=attempt_id,
-                    )
             self.attempts.append(row)
             return row
         # Work on a copy. For a catalog button, message is ACTIONS[...]["message"],
@@ -234,30 +243,20 @@ class Desk:
                 "document": "",
                 "message": "WO-2401 release was recorded on this desk. Jinchen was not called.",
             }
-        if hasattr(self.connector, "record_attempt"):
-            self.connector.record_attempt(
-                "WO-2401",
-                "WO-2401",
-                "release",
-                row["status"],
-                row["code"],
-                row["document"],
-                drop_log=False,
-                quantities=None,
-                attempt_id="release",
-            )
-        else:
-            self.connector._log(
-                "WO-2401",
-                "WO-2401",
-                "release",
-                row["status"],
-                row["code"],
-                row["document"],
-                drop_log=False,
-                quantities=None,
-                attempt_id="release",
-            )
+        self.connector.record_attempt(
+            "WO-2401",
+            "WO-2401",
+            "release",
+            row["status"],
+            row["code"],
+            row["document"],
+            drop_log=False,
+            quantities=None,
+            attempt_id="release",
+        )
+        if getattr(self.connector, "log_file_error", False):
+            row["message"] = row["message"] + " " + LOG_FILE_ERROR_MESSAGE
+            self.connector.log_file_error = False
         self.attempts.append(row)
         return row
 

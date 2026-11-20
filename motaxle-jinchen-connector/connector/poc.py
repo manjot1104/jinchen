@@ -113,6 +113,7 @@ class Ledger:
     entries: list = field(default_factory=list)
     capa_rows: list = field(default_factory=list)
     _n: int = 0
+    on_submit: object = None
 
     def open_capa(self, ref, work_order, reason):
         self.capa_rows.append((ref, work_order, reason))
@@ -130,6 +131,11 @@ class Ledger:
 
     def submit(self, kind, ref, work_order, item, qty, uom, batch, source, target, against=""):
         self._n += 1
+        if callable(self.on_submit):
+            try:
+                self.on_submit(self._n)
+            except Exception:
+                pass
         entry = Entry(
             "STE-%04d" % self._n, kind, ref, work_order, item, qty, uom, batch, source, target,
             against=against,
@@ -164,12 +170,14 @@ class Connector:
         if weight:
             self.weight.update(weight)
         self.log_path = log_path
+        self.counter_path = Path(log_path).with_name(".ste_counter") if log_path else None
         self.results_dir = results_dir
         if self.log_path:
             Path(self.log_path).parent.mkdir(parents=True, exist_ok=True)
         self.order_state = {}
         self.order_events = []
         self.ledger = Ledger()
+        self.ledger.on_submit = self._persist_ste_counter
         self.log = []
         self.confirmations = []
         self.output_batches = {}
@@ -177,11 +185,39 @@ class Connector:
         self.log_file_error = False
         self._attempt_id = ""
         self._seed()
+        self._load_ste_counter()
         self._load_log()
         self._scan_results()
+        if self.ledger._n > 0:
+            self._persist_ste_counter(self.ledger._n)
 
     def _seed(self):
         self.ledger.add(RAW, "ST-20", "H-441", 500.0)
+
+    def _persist_ste_counter(self, n=None):
+        if not self.counter_path:
+            return
+        if n is None:
+            n = self.ledger._n
+        if n <= 0:
+            return
+        try:
+            self.counter_path.parent.mkdir(parents=True, exist_ok=True)
+            self.counter_path.write_text(str(n), encoding="utf-8")
+        except OSError:
+            pass
+
+    def _load_ste_counter(self):
+        if not self.counter_path or not self.counter_path.is_file():
+            return
+        try:
+            content = self.counter_path.read_text(encoding="utf-8").strip()
+            if content:
+                n = int(content)
+                if n > self.ledger._n:
+                    self.ledger._n = n
+        except (ValueError, OSError):
+            pass
 
     def _scan_results(self):
         directory = None
@@ -206,6 +242,7 @@ class Connector:
                             self.ledger._n = n
             except Exception:
                 pass
+        self._persist_ste_counter(self.ledger._n)
 
     def _load_log(self):
         if not self.log_path:
@@ -237,72 +274,113 @@ class Connector:
                     row_kwargs["quantities"] = q if isinstance(q, dict) else {}
                     row_kwargs["entry"] = obj.get("entry") if isinstance(obj.get("entry"), dict) else {}
 
-                    entry = None
-                    if row_kwargs["status"] == "Posted" and row_kwargs.get("entry"):
-                        entry_data = dict(row_kwargs["entry"])
-                        entry_data.pop("operation", None)
-                        if "name" in entry_data and "kind" in entry_data:
-                            try:
-                                entry = Entry(**entry_data)
-                            except TypeError:
-                                entry = None
-
                     row = LogRow(**row_kwargs)
-                    self.log.append(row)
+                except (json.JSONDecodeError, ValueError, TypeError):
+                    continue
 
-                    if row.code == "E-DUP":
-                        continue
+                self.log.append(row)
 
-                    if row.status == "Posted" and entry is not None:
-                        if entry.kind == "return":
-                            has_source = any(
-                                e.kind == "issue" and e.work_order == entry.work_order and e.ref == entry.against
-                                for e in self.ledger.entries
-                            )
-                            if not has_source:
-                                continue
+                if row.code == "E-DUP":
+                    continue
 
-                        self.ledger.entries.append(entry)
-                        if entry.source:
-                            self.ledger.add(entry.source, entry.item, entry.batch, -entry.qty)
-                        if entry.target:
-                            self.ledger.add(entry.target, entry.item, entry.batch, entry.qty)
+                if row.status == "Posted" and row.kind in ("issue", "return", "disposition", "receipt") and row.entry:
+                    entry_data = dict(row.entry)
+                    entry_data.pop("operation", None)
+                    if "name" in entry_data and "kind" in entry_data and "item" in entry_data:
                         try:
-                            n = int(entry.name.split("-")[1])
-                            if n > self.ledger._n:
-                                self.ledger._n = n
-                        except (IndexError, ValueError):
-                            pass
-                        if entry.kind == "receipt" and entry.batch:
-                            self.output_batches[entry.batch] = (entry.work_order, entry.name)
+                            qty = float(entry_data.get("qty", 0.0))
+                            if qty <= 0:
+                                entry = None
+                            else:
+                                entry_data["qty"] = qty
+                                entry = Entry(**entry_data)
+                                if not isinstance(entry.item, str) or not isinstance(entry.batch, str):
+                                    entry = None
+                                if not isinstance(entry.source, str) or not isinstance(entry.target, str):
+                                    entry = None
+                        except (TypeError, ValueError):
+                            entry = None
 
-                    if row.status == "Posted" and row.kind == "confirm":
-                        operation = row.entry.get("operation")
-                        if operation is not None and operation in (10, 20):
+                        if entry is not None:
+                            can_apply = True
+                            if entry.kind == "return":
+                                has_source = any(
+                                    e.kind == "issue" and e.work_order == entry.work_order and e.ref == entry.against
+                                    for e in self.ledger.entries
+                                )
+                                if not has_source:
+                                    can_apply = False
+
+                            if can_apply:
+                                try:
+                                    if entry.source:
+                                        self.ledger.add(entry.source, entry.item, entry.batch, -entry.qty)
+                                    if entry.target:
+                                        self.ledger.add(entry.target, entry.item, entry.batch, entry.qty)
+                                    self.ledger.entries.append(entry)
+                                    if entry.name.startswith("STE-"):
+                                        n = int(entry.name.split("-")[1])
+                                        if n > self.ledger._n:
+                                            self.ledger._n = n
+                                    if entry.kind == "receipt" and entry.batch:
+                                        self.output_batches[entry.batch] = (entry.work_order, entry.name)
+                                except (TypeError, ValueError, IndexError):
+                                    pass
+
+                elif row.status == "Posted" and row.kind == "confirm":
+                    operation = row.entry.get("operation")
+                    if operation is not None and operation in (10, 20):
+                        try:
                             numbers = (
                                 float(row.quantities.get("completed", 0.0)),
                                 float(row.quantities.get("rejected", 0.0)),
                                 float(row.quantities.get("rework", 0.0)),
                                 float(row.quantities.get("scrap", 0.0)),
                             )
-                            self.confirmations.append((row.work_order, int(operation), numbers))
+                        except (ValueError, TypeError):
+                            numbers = None
 
-                    elif row.status == "Posted" and row.kind in WORK_ORDER_KINDS:
-                        key = (row.ref, row.work_order, row.kind)
-                        self.order_events.append(key)
-                        if row.kind == "hold":
-                            self.order_state[row.work_order] = "on hold"
-                        elif row.kind == "cancel":
-                            self.order_state[row.work_order] = "cancelled"
-                        elif row.kind == "resume":
-                            self.order_state.pop(row.work_order, None)
-                except (json.JSONDecodeError, ValueError, TypeError):
-                    continue
+                        if numbers is not None:
+                            out_kg = self._kg_out(row.work_order)
+                            if out_kg > 0 and not any(n < 0 for n in numbers) and sum(numbers) <= ORDER_QTY:
+                                needed = sum(numbers) * self.weight["kg_per_piece"]
+                                allowed = out_kg * (1 + self.weight["loss_allowance"])
+                                if needed <= allowed + 1e-9:
+                                    self.confirmations.append((row.work_order, int(operation), numbers))
+
+                elif row.status == "Posted" and row.kind in WORK_ORDER_KINDS:
+                    key = (row.ref, row.work_order, row.kind)
+                    if row.kind == "cancel" and self._kg_out(row.work_order) > 0:
+                        continue
+                    if row.kind == "resume" and self.order_state.get(row.work_order) != "on hold":
+                        continue
+                    self.order_events.append(key)
+                    if row.kind == "hold":
+                        self.order_state[row.work_order] = "on hold"
+                    elif row.kind == "cancel":
+                        self.order_state[row.work_order] = "cancelled"
+                    elif row.kind == "resume":
+                        self.order_state.pop(row.work_order, None)
         except OSError:
             pass
+        self._persist_ste_counter(self.ledger._n)
 
     def record_attempt(self, ref, work_order, kind, status, code, document, drop_log=False, quantities=None, attempt_id="", entry=None):
         self._log(ref, work_order, kind, status, code, document, drop_log=drop_log, quantities=quantities, attempt_id=attempt_id, entry=entry)
+
+    def record_queued(self, attempt_id, message=None):
+        """Record a Queued attempt for Switch A, skipping duplicate log rows."""
+        last_for_attempt = next(
+            (r for r in reversed(self.log) if getattr(r, "attempt_id", "") == attempt_id),
+            None,
+        )
+        if last_for_attempt and getattr(last_for_attempt, "status", "") == "Queued":
+            return False
+        kind = (message or {}).get("kind") or ""
+        ref = (message or {}).get("id") or attempt_id
+        work_order = (message or {}).get("work_order") or ""
+        self.record_attempt(ref, work_order, kind, "Queued", "", "", drop_log=False, quantities=None, attempt_id=attempt_id)
+        return True
 
     def _log(self, ref, work_order, kind, status, code, document, drop_log=False, quantities=None, attempt_id="", entry=None):
         if drop_log:
@@ -323,45 +401,48 @@ class Connector:
 
     def process(self, message, drop_log=False, attempt_id=""):
         self._attempt_id = attempt_id
-        if not isinstance(message, dict):
-            # No id to log against. A list, None, or a string is not a message.
-            return Result("Business Rejected", "E-ITEM", "", "Unknown message.")
-        kind = message.get("kind")
-        ref = message.get("id") or ""
-        work_order = message.get("work_order") or ""
-        if not ref or not work_order:
-            return self._done("Business Rejected", "E-QTY", "", "Id and work order are required.", ref, work_order, kind or "", drop_log)
-        existing = self.ledger.find(ref, work_order, kind)
-        if existing and kind in ("issue", "return", "disposition", "receipt"):
-            return self._done("Posted", "E-DUP", existing.name, "Already posted. No second stock entry.", ref, work_order, kind, drop_log)
-        if kind in WORK_ORDER_KINDS:
-            return self._work_order(message, kind, drop_log)
-        state = self.order_state.get(work_order)
-        if state and kind in CLOSED_KINDS:
-            return self._done("Business Rejected", "E-CLOSED", "", "Work order is " + state + ".", ref, work_order, kind, drop_log)
-        handler = {
-            "issue": self._issue,
-            "return": self._return,
-            "confirm": self._confirm,
-            "disposition": self._disposition,
-            "receipt": self._receipt,
-        }.get(kind)
-        if handler is None:
-            return self._done("Business Rejected", "E-ITEM", "", "Unknown message.", ref, work_order, kind or "", drop_log)
-        # Work on a copy. The caller's dictionary is never changed.
-        message = dict(message)
-        for key in NUMBER_FIELDS:
-            if key in message and message[key] is not None:
-                number = _number(message[key])
-                if number is None:
-                    return self._done("Business Rejected", "E-QTY", "", "Quantity is not a number.", ref, work_order, kind, drop_log)
-                message[key] = number
-        if "operation" in message and message["operation"] is not None:
-            operation = _number(message["operation"])
-            if operation is None or operation != int(operation):
-                return self._done("Business Rejected", "E-OP", "", "Operation is not on the demo route.", ref, work_order, kind, drop_log)
-            message["operation"] = int(operation)
-        return handler(message, drop_log)
+        try:
+            if not isinstance(message, dict):
+                # No id to log against. A list, None, or a string is not a message.
+                return Result("Business Rejected", "E-ITEM", "", "Unknown message.")
+            kind = message.get("kind")
+            ref = message.get("id") or ""
+            work_order = message.get("work_order") or ""
+            if not ref or not work_order:
+                return self._done("Business Rejected", "E-QTY", "", "Id and work order are required.", ref, work_order, kind or "", drop_log)
+            existing = self.ledger.find(ref, work_order, kind)
+            if existing and kind in ("issue", "return", "disposition", "receipt"):
+                return self._done("Posted", "E-DUP", existing.name, "Already posted. No second stock entry.", ref, work_order, kind, drop_log)
+            if kind in WORK_ORDER_KINDS:
+                return self._work_order(message, kind, drop_log)
+            state = self.order_state.get(work_order)
+            if state and kind in CLOSED_KINDS:
+                return self._done("Business Rejected", "E-CLOSED", "", "Work order is " + state + ".", ref, work_order, kind, drop_log)
+            handler = {
+                "issue": self._issue,
+                "return": self._return,
+                "confirm": self._confirm,
+                "disposition": self._disposition,
+                "receipt": self._receipt,
+            }.get(kind)
+            if handler is None:
+                return self._done("Business Rejected", "E-ITEM", "", "Unknown message.", ref, work_order, kind or "", drop_log)
+            # Work on a copy. The caller's dictionary is never changed.
+            message = dict(message)
+            for key in NUMBER_FIELDS:
+                if key in message and message[key] is not None:
+                    number = _number(message[key])
+                    if number is None:
+                        return self._done("Business Rejected", "E-QTY", "", "Quantity is not a number.", ref, work_order, kind, drop_log)
+                    message[key] = number
+            if "operation" in message and message["operation"] is not None:
+                operation = _number(message["operation"])
+                if operation is None or operation != int(operation):
+                    return self._done("Business Rejected", "E-OP", "", "Operation is not on the demo route.", ref, work_order, kind, drop_log)
+                message["operation"] = int(operation)
+            return handler(message, drop_log)
+        finally:
+            self._attempt_id = ""
 
     def _issue(self, message, drop_log):
         ref = message["id"]

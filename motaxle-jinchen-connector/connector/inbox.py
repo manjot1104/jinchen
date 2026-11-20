@@ -130,40 +130,20 @@ def read_next(
             "message": QUEUED_MESSAGE,
         }
         move_to_done = False
-        should_log = True
-        if hasattr(connector, "log") and connector.log:
-            last_for_attempt = next(
-                (row for row in reversed(connector.log) if getattr(row, "attempt_id", "") == source.name),
-                None,
+        if hasattr(connector, "record_queued"):
+            connector.record_queued(source.name, message)
+        else:
+            connector.record_attempt(
+                message.get("id") or "",
+                message.get("work_order") or "",
+                message.get("kind") or "",
+                "Queued",
+                "",
+                "",
+                drop_log=False,
+                quantities=None,
+                attempt_id=source.name,
             )
-            if last_for_attempt and getattr(last_for_attempt, "status", "") == "Queued":
-                should_log = False
-
-        if should_log:
-            if hasattr(connector, "record_attempt"):
-                connector.record_attempt(
-                    message.get("id") or "",
-                    message.get("work_order") or "",
-                    message.get("kind") or "",
-                    "Queued",
-                    "",
-                    "",
-                    drop_log=False,
-                    quantities=None,
-                    attempt_id=source.name,
-                )
-            elif hasattr(connector, "_log"):
-                connector._log(
-                    message.get("id") or "",
-                    message.get("work_order") or "",
-                    message.get("kind") or "",
-                    "Queued",
-                    "",
-                    "",
-                    drop_log=False,
-                    quantities=None,
-                    attempt_id=source.name,
-                )
     else:
         try:
             params = inspect.signature(connector.process).parameters
