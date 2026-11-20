@@ -318,6 +318,55 @@ class ConfigTests(unittest.TestCase):
         self.assertNotIn("ALL PASS", lines)
         self.assertTrue(any(line.startswith("NOT PASS:") for line in lines))
 
+    def test_snapshot_tree_detects_add_modify_rename_and_delete(self):
+        import prove
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            nested = root / "sub"
+            nested.mkdir()
+            target = nested / "a.json"
+            target.write_text('{"x": 1}', encoding="utf-8")
+            base = prove.snapshot_tree(root)
+
+            # Modification
+            target.write_text('{"x": 2}', encoding="utf-8")
+            self.assertNotEqual(prove.snapshot_tree(root), base)
+
+            # Addition
+            target.write_text('{"x": 1}', encoding="utf-8")
+            (root / "extra.json").write_text("{}", encoding="utf-8")
+            self.assertNotEqual(prove.snapshot_tree(root), base)
+
+            # Rename / move
+            (root / "extra.json").unlink()
+            target.rename(nested / "b.json")
+            self.assertNotEqual(prove.snapshot_tree(root), base)
+
+            # Deletion
+            (nested / "b.json").unlink()
+            self.assertNotEqual(prove.snapshot_tree(root), base)
+
+    def test_prove_main_fails_if_repo_inbox_snapshot_changes(self):
+        import prove
+        with tempfile.TemporaryDirectory() as temp:
+            path = write_config(temp, "test", "")
+            calls = {"n": 0}
+
+            def mutating_snapshot(_directory):
+                calls["n"] += 1
+                return {"in/extra.json": f"hash-{calls['n']}"}
+
+            with mock.patch.object(inbox, "CONFIG_PATH", path), \
+                 mock.patch.object(prove, "snapshot_tree", side_effect=mutating_snapshot), \
+                 mock.patch("builtins.print") as printed:
+                with self.assertRaises(SystemExit) as caught:
+                    prove.main()
+
+        self.assertEqual(caught.exception.code, 1)
+        lines = [str(call.args[0]) for call in printed.call_args_list if call.args]
+        self.assertNotIn("ALL PASS", lines)
+        self.assertTrue(any("TC-12 FAIL" in line for line in lines))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,4 +1,5 @@
 from contextlib import contextmanager
+import hashlib
 import json
 from pathlib import Path
 import shutil
@@ -52,6 +53,21 @@ def return_message(ref="R-1", qty=4):
         "against": "J-100", "item": "ST-20", "qty": qty,
         "uom": "Kg", "batch": "H-441",
     }
+
+
+def snapshot_tree(directory):
+    """Return a deterministic mapping of relative paths to SHA-256 digests."""
+    root = Path(directory)
+    if not root.exists():
+        return {}
+    entries = {}
+    for path in sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix()):
+        rel = path.relative_to(root).as_posix()
+        if path.is_file():
+            entries[rel] = hashlib.sha256(path.read_bytes()).hexdigest()
+        elif path.is_dir():
+            entries[rel + "/"] = None
+    return entries
 
 
 @contextmanager
@@ -246,6 +262,9 @@ def main():
     check("11", "finished-goods receipt is blocked and batch trace is exact", tc11)
 
     def tc12():
+        before_in = snapshot_tree(REPO_INBOX / "in")
+        before_done = snapshot_tree(REPO_INBOX / "done")
+        expected_samples = {p.name for p in (REPO_INBOX / "samples").glob("*.json")}
         with run_folder(REPO_INBOX / "samples", config=config) as (
             inbox_connector,
             results,
@@ -269,12 +288,20 @@ def main():
             equal(trace["heat"], "H-441", "B-1 trace heat")
             equal(trace["work_order"], "WO-2401", "B-1 trace work order")
             equal(trace["document"], "STE-0006", "B-1 trace document")
-            equal(len(list(done_dir.glob("*.json"))), 9, "done file count")
-            equal(len(list(results_dir.glob("*.json"))), 9, "results file count")
+            done_names = {p.name for p in done_dir.glob("*.json")}
+            result_names = {p.name for p in results_dir.glob("*.json")}
+            equal(len(done_names), 9, "done file count")
+            equal(len(result_names), 9, "results file count")
+            equal(done_names, expected_samples, "done filenames")
+            equal(result_names, expected_samples, "results filenames")
+        equal(snapshot_tree(REPO_INBOX / "in"), before_in, "repo inbox/in unchanged")
+        equal(snapshot_tree(REPO_INBOX / "done"), before_done, "repo inbox/done unchanged")
 
     check("12", "nine sample files reach raw 384, hold 96, finished 0 through read_all.", tc12)
 
     def tc13():
+        before_in = snapshot_tree(REPO_INBOX / "in")
+        before_done = snapshot_tree(REPO_INBOX / "done")
         expected_codes = {
             "ex-st20.json": "E-ITEM",
             "ex-h441.json": "E-BATCH",
@@ -291,6 +318,9 @@ def main():
             results_dir,
         ):
             equal(len(results), 8, "example result count")
+            result_names = {p.name for p in results_dir.glob("*.json")}
+            equal(len(result_names), 8, "example result file count")
+            equal(result_names, set(expected_codes), "example result filenames")
             for filename, expected_code in expected_codes.items():
                 data = json.loads((results_dir / filename).read_text(encoding="utf-8"))
                 equal(data["status"], "Business Rejected", f"{filename} status")
@@ -304,6 +334,8 @@ def main():
             equal(len(example_connector.ledger.entries), 0, "example entries unchanged")
             equal(example_connector.ledger.capa, 0, "example CAPA unchanged")
             equal(example_connector.ledger.capa_rows, [], "example CAPA rows unchanged")
+        equal(snapshot_tree(REPO_INBOX / "in"), before_in, "repo inbox/in unchanged")
+        equal(snapshot_tree(REPO_INBOX / "done"), before_done, "repo inbox/done unchanged")
 
     check("13", "eight bad example files are refused without moving stock", tc13)
 
