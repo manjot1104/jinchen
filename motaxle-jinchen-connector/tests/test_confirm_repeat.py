@@ -1,5 +1,7 @@
 """Tests for repeated confirmation idempotency (US-090)."""
 
+import copy
+import pickle
 import shutil
 import tempfile
 import unittest
@@ -194,6 +196,72 @@ class ConfirmRepeatTests(unittest.TestCase):
         self.assertEqual(confirm_logs[0].quantities, {"completed": 100.0, "rejected": 0.0, "rework": 0.0, "scrap": 0.0})
         # The repeated log row must record stored quantities (100, 0, 0, 0), not incoming (50, 10, 0, 0)
         self.assertEqual(confirm_logs[1].quantities, {"completed": 100.0, "rejected": 0.0, "rework": 0.0, "scrap": 0.0})
+
+    def test_string_float_operation_normalized_and_repeat_is_e_dup(self):
+        """String float operation '10.0' is normalized to 10 and not stored twice."""
+        c = with_metal()
+        first = c.process(confirm("CF-10", operation="10.0", completed=100))
+        self.assertEqual(first.status, "Posted")
+        self.assertEqual(first.code, "")
+        self.assertEqual(len(c.confirmations), 1)
+        self.assertEqual(c.confirmations[0], ("WO-2401", 10, (100.0, 0.0, 0.0, 0.0)))
+
+        repeat = c.process(confirm("CF-10", operation="10.0", completed=100))
+        self.assertEqual(repeat.status, "Posted")
+        self.assertEqual(repeat.code, "E-DUP")
+        self.assertEqual(repeat.message, "Already confirmed. Not stored again.")
+        self.assertEqual(len(c.confirmations), 1)
+
+    def test_fractional_operation_returns_e_op_not_e_dup(self):
+        """Fractional operation 10.5 returns Business Rejected E-OP, never E-DUP."""
+        c = with_metal()
+        first = c.process(confirm("CF-10", operation=10, completed=100))
+        self.assertEqual(first.status, "Posted")
+        self.assertEqual(len(c.confirmations), 1)
+
+        frac = c.process(confirm("CF-10", operation=10.5, completed=100))
+        self.assertEqual(frac.status, "Business Rejected")
+        self.assertEqual(frac.code, "E-OP")
+        self.assertEqual(frac.message, "Operation is not on the demo route.")
+        self.assertEqual(len(c.confirmations), 1)
+
+    def test_infinity_and_nan_operation_returns_e_op_without_overflow(self):
+        """Operation with Infinity or NaN returns Business Rejected E-OP without OverflowError."""
+        c = with_metal()
+        res_inf = c.process(confirm("CF-INF", operation=float("inf"), completed=100))
+        self.assertEqual(res_inf.status, "Business Rejected")
+        self.assertEqual(res_inf.code, "E-OP")
+
+        res_inf_str = c.process(confirm("CF-INF2", operation="Infinity", completed=100))
+        self.assertEqual(res_inf_str.status, "Business Rejected")
+        self.assertEqual(res_inf_str.code, "E-OP")
+
+        res_nan = c.process(confirm("CF-NAN", operation=float("nan"), completed=100))
+        self.assertEqual(res_nan.status, "Business Rejected")
+        self.assertEqual(res_nan.code, "E-OP")
+
+    def test_connector_deepcopy_and_pickle_support(self):
+        """Connector supports copy, deepcopy, and pickle round-trips without tuple subclass errors."""
+        c = with_metal()
+        c.process(confirm("CF-10", operation=10, completed=100))
+        self.assertEqual(len(c.confirmations), 1)
+
+        c_copied = copy.copy(c)
+        self.assertEqual(c_copied.confirmations, c.confirmations)
+
+        c_deep = copy.deepcopy(c)
+        self.assertEqual(c_deep.confirmations, c.confirmations)
+        self.assertEqual(c_deep.confirm_keys, c.confirm_keys)
+
+        c_pickled = pickle.loads(pickle.dumps(c))
+        self.assertEqual(c_pickled.confirmations, c.confirmations)
+        self.assertEqual(c_pickled.confirm_keys, c.confirm_keys)
+
+        # Confirm that repeat on unpickled connector still detects duplicate
+        repeat = c_pickled.process(confirm("CF-10", operation=10, completed=100))
+        self.assertEqual(repeat.status, "Posted")
+        self.assertEqual(repeat.code, "E-DUP")
+        self.assertEqual(len(c_pickled.confirmations), 1)
 
 
 if __name__ == "__main__":

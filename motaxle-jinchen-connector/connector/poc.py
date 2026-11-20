@@ -102,34 +102,6 @@ class Result:
     message: str
 
 
-class Confirmation(tuple):
-    """Stored confirmation: (work_order, operation, numbers, ref).
-    Maintains 3-tuple compatibility for (work_order, operation, numbers)
-    while storing ref on the tuple.
-    """
-
-    def __new__(cls, work_order, operation, numbers, ref=""):
-        obj = super().__new__(cls, (work_order, operation, tuple(numbers)))
-        obj.ref = ref
-        return obj
-
-    def __getitem__(self, item):
-        if item == 3:
-            return self.ref
-        return super().__getitem__(item)
-
-    @property
-    def work_order(self):
-        return self[0]
-
-    @property
-    def operation(self):
-        return self[1]
-
-    @property
-    def numbers(self):
-        return self[2]
-
 
 @dataclass
 class Ledger:
@@ -189,16 +161,11 @@ class Connector:
         self.ledger = Ledger()
         self.log = []
         self.confirmations = []
+        self.confirm_keys = set()
+        self._confirm_quantities = {}
         self.output_batches = {}
         self.inspection_required = True
         self._seed()
-
-    @property
-    def confirm_keys(self):
-        return {
-            (getattr(c, "ref", c[3] if len(c) > 3 else ""), c[0], c[1])
-            for c in self.confirmations
-        }
 
     def _seed(self):
         self.ledger.add(RAW, "ST-20", "H-441", 500.0)
@@ -216,6 +183,8 @@ class Connector:
         if not isinstance(message, dict):
             # No id to log against. A list, None, or a string is not a message.
             return Result("Business Rejected", "E-ITEM", "", "Unknown message.")
+        # Work on a copy. The caller's dictionary is never changed.
+        message = dict(message)
         kind = message.get("kind")
         ref = message.get("id") or ""
         work_order = message.get("work_order") or ""
@@ -225,19 +194,17 @@ class Connector:
         if existing and kind in ("issue", "return", "disposition", "receipt"):
             return self._done("Posted", "E-DUP", existing.name, "Already posted. No second stock entry.", ref, work_order, kind, drop_log)
         if kind == "confirm":
-            operation = message.get("operation")
+            op_num = _number(message.get("operation"))
             try:
-                op_int = int(operation) if operation is not None else 0
-            except (ValueError, TypeError):
-                op_int = 0
-            existing_confirm = next(
-                (c for c in self.confirmations
-                 if (getattr(c, "ref", None) == ref or (len(c) > 3 and c[3] == ref))
-                 and c[0] == work_order and c[1] == op_int),
-                None,
-            )
-            if existing_confirm:
-                stored_q = dict(zip(("completed", "rejected", "rework", "scrap"), existing_confirm[2]))
+                if op_num is None or op_num != int(op_num):
+                    return self._done("Business Rejected", "E-OP", "", "Operation is not on the demo route.", ref, work_order, kind, drop_log)
+                op_int = int(op_num)
+            except (OverflowError, ValueError):
+                return self._done("Business Rejected", "E-OP", "", "Operation is not on the demo route.", ref, work_order, kind, drop_log)
+            message["operation"] = op_int
+            key = (ref, work_order, op_int)
+            if key in self.confirm_keys:
+                stored_q = self._confirm_quantities.get(key, {})
                 return self._done("Posted", "E-DUP", "", "Already confirmed. Not stored again.", ref, work_order, "confirm", drop_log, quantities=stored_q)
         if kind in WORK_ORDER_KINDS:
             return self._work_order(message, kind, drop_log)
@@ -253,8 +220,6 @@ class Connector:
         }.get(kind)
         if handler is None:
             return self._done("Business Rejected", "E-ITEM", "", "Unknown message.", ref, work_order, kind or "", drop_log)
-        # Work on a copy. The caller's dictionary is never changed.
-        message = dict(message)
         for key in NUMBER_FIELDS:
             if key in message and message[key] is not None:
                 number = _number(message[key])
@@ -262,10 +227,13 @@ class Connector:
                     return self._done("Business Rejected", "E-QTY", "", "Quantity is not a number.", ref, work_order, kind, drop_log)
                 message[key] = number
         if "operation" in message and message["operation"] is not None:
-            operation = _number(message["operation"])
-            if operation is None or operation != int(operation):
+            op_num = _number(message["operation"])
+            try:
+                if op_num is None or op_num != int(op_num):
+                    return self._done("Business Rejected", "E-OP", "", "Operation is not on the demo route.", ref, work_order, kind, drop_log)
+                message["operation"] = int(op_num)
+            except (OverflowError, ValueError):
                 return self._done("Business Rejected", "E-OP", "", "Operation is not on the demo route.", ref, work_order, kind, drop_log)
-            message["operation"] = int(operation)
         return handler(message, drop_log)
 
     def _issue(self, message, drop_log):
@@ -357,7 +325,10 @@ class Connector:
         if needed > allowed + 1e-9:
             return self._done("Business Rejected", "E-QTY", "", "Pieces need more steel than was issued.", ref, work_order, "confirm", drop_log)
         quantities = dict(zip(("completed", "rejected", "rework", "scrap"), numbers))
-        self.confirmations.append(Confirmation(work_order, operation, tuple(numbers), ref=ref))
+        key = (ref, work_order, operation)
+        self.confirm_keys.add(key)
+        self._confirm_quantities[key] = quantities
+        self.confirmations.append((work_order, operation, tuple(numbers)))
         return self._done("Posted", "", "", "Confirmation stored. Finished goods unchanged.", ref, work_order, "confirm", drop_log, quantities)
 
     def _kg_out(self, work_order):
