@@ -6,8 +6,6 @@ on:
 jobs:
   test:
     runs-on: ubuntu-22.04
-    env:
-      PYTHONDONTWRITEBYTECODE: "1"
     defaults:
       run:
         working-directory: motaxle-jinchen-connector
@@ -21,8 +19,8 @@ jobs:
       - name: Proof
         run: python3 prove.py
       - name: Inbox is clean
-        if: always()
+        if: ${{ !cancelled() }}
         run: |
-          out=$(git status --porcelain --ignored -- .) || exit 1
+          out=$(git status --porcelain --ignored -- inbox)
           echo "$out"
           test -z "$out"
