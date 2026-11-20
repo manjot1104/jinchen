@@ -18,9 +18,10 @@ jobs:
         run: python3 -m unittest discover tests -v
       - name: Proof
         run: python3 prove.py
-      - name: Inbox is clean
+      - name: Working tree is clean
         if: ${{ !cancelled() }}
         run: |
-          out=$(git status --porcelain --ignored -- inbox)
+          out=$(git status --porcelain -- .)
           echo "$out"
           test -z "$out"
+

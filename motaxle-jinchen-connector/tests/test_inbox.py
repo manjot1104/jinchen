@@ -21,7 +21,58 @@ def temp_inbox(root):
     return inbox, root / "done", root / "results"
 
 
+_temp_dir = None
+_patchers = []
+
+
+def setUpModule():
+    global _temp_dir, _patchers
+    _temp_dir = tempfile.TemporaryDirectory()
+    temp_path = Path(_temp_dir.name)
+    in_dir = temp_path / "in"
+    done_dir = temp_path / "done"
+    results_dir = temp_path / "results"
+    in_dir.mkdir(parents=True, exist_ok=True)
+    done_dir.mkdir(parents=True, exist_ok=True)
+    results_dir.mkdir(parents=True, exist_ok=True)
+
+    import connector.inbox
+    _patchers = [
+        mock.patch.object(connector.inbox, "INBOX_DIR", in_dir),
+        mock.patch.object(connector.inbox, "DONE_DIR", done_dir),
+        mock.patch.object(connector.inbox, "RESULTS_DIR", results_dir),
+    ]
+    for p in _patchers:
+        p.start()
+
+
+def tearDownModule():
+    global _temp_dir, _patchers
+    for p in reversed(_patchers):
+        p.stop()
+    if _temp_dir is not None:
+        _temp_dir.cleanup()
+        _temp_dir = None
+    real_in = PROJECT / "inbox" / "in"
+    real_done = PROJECT / "inbox" / "done"
+    real_results = PROJECT / "inbox" / "results"
+    for d in (real_in, real_done, real_results):
+        if d.is_dir():
+            leaks = list(d.glob("*.json"))
+            if leaks:
+                raise AssertionError(f"Test leaked files into real inbox directory {d}: {leaks}")
+
+
 class InboxTests(unittest.TestCase):
+    def test_default_inbox_folders_isolated_by_module_setup(self):
+        connector = Connector()
+        outcomes = read_all(connector)
+        self.assertEqual(outcomes, [])
+        for folder in ("in", "done", "results"):
+            real_dir = PROJECT / "inbox" / folder
+            if real_dir.is_dir():
+                self.assertEqual(list(real_dir.glob("*.json")), [])
+
     def test_log_failure_replay_does_not_duplicate_stock(self):
         project = Path(__file__).resolve().parent.parent
         sample = project / "inbox" / "samples" / "01-issue-J-100-log-fails.json"
