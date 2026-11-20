@@ -1,0 +1,12 @@
+inbox/in/*
+!inbox/in/KEEP
+inbox/done/*
+!inbox/done/KEEP
+inbox/results/*
+!inbox/results/KEEP
+inbox/log.jsonl
+inbox/.ste_counter
+inbox/ledger.jsonl
+inbox/archive/
+log.jsonl
+.ste_counter
