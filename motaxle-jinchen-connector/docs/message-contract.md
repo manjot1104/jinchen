@@ -10,7 +10,7 @@ Eleven codes. E-CLOSED was added on 18 November 2026 (US-082, decision D-7 in [d
 
 | Code | Meaning |
 |---|---|
-| E-DUP | The same id, work order and kind was already applied. Status stays Posted and the first document is returned. For confirmations, the repeat key is id + work_order + operation, the document is empty, and a repeated confirmation logs the original stored quantities. |
+| E-DUP | The same id, work order and kind was already applied. Status stays Posted and the first document is returned. For confirmations, the repeat key is id + work_order + operation, the document is empty, and a repeated confirmation logs without quantities. |
 | E-ITEM | Wrong or missing item, unknown kind, or a return against an issue that was not posted. |
 | E-UOM | Wrong unit. |
 | E-WH | Wrong warehouse on an issue. |
@@ -27,8 +27,8 @@ Eleven codes. E-CLOSED was added on 18 November 2026 (US-082, decision D-7 in [d
 | Field | Type | Required | Allowed values | When wrong |
 |---|---|---|---|---|
 | kind | string | yes | issue, return, confirm, disposition, receipt, hold, resume, cancel | E-ITEM *Unknown message.* |
-| id | string | yes | any; the repeat key is id + work_order + kind (for confirmations, id + work_order + operation) | E-QTY *Id and work order are required.* |
-| work_order | string | yes | WO-2401 in the samples | E-QTY *Id and work order are required.*; E-CLOSED when the order is on hold or cancelled |
+| id | string or number | yes | any; the repeat key is id + work_order + kind (for confirmations, id + work_order + operation) | E-QTY *Id and work order are required.*; E-QTY *Id and work order must be strings or numbers.* |
+| work_order | string or number | yes | WO-2401 in the samples | E-QTY *Id and work order are required.*; E-QTY *Id and work order must be strings or numbers.*; E-CLOSED when the order is on hold or cancelled |
 
 ## issue (sample 01)
 
@@ -64,10 +64,16 @@ Eleven codes. E-CLOSED was added on 18 November 2026 (US-082, decision D-7 in [d
 
 Checks across the fields, in this order:
 
-1. A repeated confirmation (same id, work order and operation) returns Posted with E-DUP *Already confirmed. Not stored again.* and an empty document, logging the stored quantities. This repeat check runs first, before the closed-state check (E-CLOSED) and validation checks.
-2. completed + rejected + rework + scrap is not above the order of 100: E-QTY *Completed pieces are above the order.* (US-079)
-3. Steel is out on this work order (issued minus returned above 0): E-QTY *No metal was issued on this work order.* (US-080)
-4. The pieces × kg_per_piece is not above the steel out × (1 + loss_allowance), both from `config.json`: E-QTY *Pieces need more steel than was issued.* (US-081)
+1. `id` and `work_order` type checks run first: missing values return E-QTY *Id and work order are required.*, unhashable types or booleans return E-QTY *Id and work order must be strings or numbers.*
+2. A repeated confirmation with identical quantities (same id, work order, and operation 10 or 20) returns Posted with E-DUP *Already confirmed. Not stored again.* and an empty document, logging without quantities. This matching repeat check runs before the closed-state check (E-CLOSED).
+3. If the work order is on hold or cancelled, confirm returns E-CLOSED *Work order is on hold.* or E-CLOSED *Work order is cancelled.* (a conflicting replay on a closed order returns E-CLOSED).
+4. A repeated confirmation with differing quantities on an open order returns E-QTY *Confirmation differs from the stored one. Send it with a new id.*
+5. Quantity fields must be finite numbers: non-numeric or non-finite values return E-QTY *Quantity is not a number.*
+6. Route operation check: operation must be 10 or 20 (30 is vendor work and is ignored). Unparseable or off-route operations return E-OP *Operation is not on the demo route.*
+7. completed, rejected, rework, scrap must be non-negative: E-QTY *A quantity is negative.*
+8. completed + rejected + rework + scrap is not above the order of 100: E-QTY *Completed pieces are above the order.* (US-079)
+9. Steel is out on this work order (issued minus returned above 0): E-QTY *No metal was issued on this work order.* (US-080)
+10. The pieces × kg_per_piece is not above the steel out × (1 + loss_allowance), both from `config.json`: E-QTY *Pieces need more steel than was issued.* (US-081)
 
 A confirmation never creates a stock entry. The four quantities are stored separately on the log row.
 

@@ -6,6 +6,7 @@ No network call is made. Field names are the POC contract, not a signed API.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 
@@ -42,6 +43,7 @@ class ConfigError(Exception):
 
 
 NUMBER_FIELDS = ("qty", "completed", "rejected", "rework", "scrap")
+CONFIRM_FIELDS = ("completed", "rejected", "rework", "scrap")
 
 
 def _number(value):
@@ -52,13 +54,37 @@ def _number(value):
     if isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
-        return float(value)
+        try:
+            val = float(value)
+            if not math.isfinite(val):
+                return None
+            return val
+        except (OverflowError, ValueError):
+            return None
     if isinstance(value, str):
         try:
-            return float(value.strip())
-        except ValueError:
+            val = float(value.strip())
+            if not math.isfinite(val):
+                return None
+            return val
+        except (OverflowError, ValueError):
             return None
     return None
+
+
+def _confirm_numbers(message):
+    """Return tuple of (completed, rejected, rework, scrap) as floats, or None if invalid."""
+    numbers = []
+    for k in CONFIRM_FIELDS:
+        raw_val = message.get(k)
+        if raw_val is None:
+            numbers.append(0.0)
+        else:
+            num = _number(raw_val)
+            if num is None:
+                return None
+            numbers.append(float(num))
+    return tuple(numbers)
 
 
 def _operation(message):
@@ -69,7 +95,10 @@ def _operation(message):
     """
     if "operation" not in message or message["operation"] is None:
         return None
-    num = _number(message["operation"])
+    val = message["operation"]
+    if isinstance(val, bool):
+        return False
+    num = _number(val)
     try:
         if num is None or num != int(num):
             return False
@@ -176,11 +205,23 @@ class Connector:
         self.order_events = []
         self.ledger = Ledger()
         self.log = []
-        self.confirmations = []
-        self._confirm_quantities = {}
+        self._confirm_store = {}
         self.output_batches = {}
         self.inspection_required = True
         self._seed()
+
+    @property
+    def confirmations(self):
+        return [(wo, op, nums) for (ref, wo, op), nums in self._confirm_store.items()]
+
+    @confirmations.setter
+    def confirmations(self, val):
+        if not val:
+            self._confirm_store.clear()
+
+    @property
+    def _confirm_quantities(self):
+        return {k: dict(zip(CONFIRM_FIELDS, v)) for k, v in self._confirm_store.items()}
 
     def _seed(self):
         self.ledger.add(RAW, "ST-20", "H-441", 500.0)
@@ -201,34 +242,54 @@ class Connector:
         # Work on a copy. The caller's dictionary is never changed.
         message = dict(message)
         kind = message.get("kind")
-        ref = message.get("id") or ""
-        work_order = message.get("work_order") or ""
-        if not ref or not work_order or not isinstance(ref, str) or not isinstance(work_order, str):
-            return self._done("Business Rejected", "E-QTY", "", "Id and work order are required.", ref if isinstance(ref, str) else "", work_order if isinstance(work_order, str) else "", kind or "", drop_log)
+        ref_raw = message.get("id")
+        wo_raw = message.get("work_order")
+
+        if ref_raw is None or wo_raw is None or ref_raw == "" or wo_raw == "":
+            return self._done("Business Rejected", "E-QTY", "", "Id and work order are required.", "", "", kind if isinstance(kind, str) else "", drop_log)
+        if (
+            isinstance(ref_raw, (bool, list, dict, set, tuple))
+            or isinstance(wo_raw, (bool, list, dict, set, tuple))
+            or not isinstance(ref_raw, (str, int, float))
+            or not isinstance(wo_raw, (str, int, float))
+        ):
+            return self._done("Business Rejected", "E-QTY", "", "Id and work order must be strings or numbers.", "", "", kind if isinstance(kind, str) else "", drop_log)
+
+        ref = str(ref_raw)
+        work_order = str(wo_raw)
+        message["id"] = ref
+        message["work_order"] = work_order
+
+        if not isinstance(kind, str):
+            return self._done("Business Rejected", "E-ITEM", "", "Unknown message.", ref, work_order, "", drop_log)
+
         existing = self.ledger.find(ref, work_order, kind)
         if existing and kind in ("issue", "return", "disposition", "receipt"):
             return self._done("Posted", "E-DUP", existing.name, "Already posted. No second stock entry.", ref, work_order, kind, drop_log)
+
+        op = _operation(message)
+        differing_confirm = False
         if kind == "confirm":
-            op_int = _operation(message)
-            if isinstance(op_int, int):
-                key = (ref, work_order, op_int)
-                if key in self._confirm_quantities:
-                    stored_q = self._confirm_quantities[key]
-                    differs = False
-                    for k in ("completed", "rejected", "rework", "scrap"):
-                        raw_val = message.get(k)
-                        num_val = _number(raw_val) if raw_val is not None else 0.0
-                        if num_val is None or float(num_val) != float(stored_q.get(k, 0.0)):
-                            differs = True
-                            break
-                    if differs:
-                        return self._done("Business Rejected", "E-QTY", "", "differs from the stored confirmation", ref, work_order, "confirm", drop_log)
-                    return self._done("Posted", "E-DUP", "", "Already confirmed. Not stored again.", ref, work_order, "confirm", drop_log, quantities=stored_q)
+            if op is not False and op is not None and op in (10, 20):
+                key = (ref, work_order, op)
+                if key in self._confirm_store:
+                    stored_numbers = self._confirm_store[key]
+                    current_numbers = _confirm_numbers(message)
+                    if current_numbers == stored_numbers:
+                        return self._done("Posted", "E-DUP", "", "Already confirmed. Not stored again.", ref, work_order, "confirm", drop_log, quantities=None)
+                    else:
+                        differing_confirm = True
+
         if kind in WORK_ORDER_KINDS:
             return self._work_order(message, kind, drop_log)
+
         state = self.order_state.get(work_order)
         if state and kind in CLOSED_KINDS:
             return self._done("Business Rejected", "E-CLOSED", "", "Work order is " + state + ".", ref, work_order, kind, drop_log)
+
+        if differing_confirm:
+            return self._done("Business Rejected", "E-QTY", "", "Confirmation differs from the stored one. Send it with a new id.", ref, work_order, "confirm", drop_log)
+
         handler = {
             "issue": self._issue,
             "return": self._return,
@@ -237,18 +298,19 @@ class Connector:
             "receipt": self._receipt,
         }.get(kind)
         if handler is None:
-            return self._done("Business Rejected", "E-ITEM", "", "Unknown message.", ref, work_order, kind or "", drop_log)
+            return self._done("Business Rejected", "E-ITEM", "", "Unknown message.", ref, work_order, kind, drop_log)
+
         for key in NUMBER_FIELDS:
             if key in message and message[key] is not None:
                 number = _number(message[key])
                 if number is None:
                     return self._done("Business Rejected", "E-QTY", "", "Quantity is not a number.", ref, work_order, kind, drop_log)
                 message[key] = number
-        if "operation" in message and message["operation"] is not None:
-            op_int = _operation(message)
-            if op_int is False or op_int is None:
-                return self._done("Business Rejected", "E-OP", "", "Operation is not on the demo route.", ref, work_order, kind, drop_log)
-            message["operation"] = op_int
+
+        if op is False:
+            return self._done("Business Rejected", "E-OP", "", "Operation is not on the demo route.", ref, work_order, kind, drop_log)
+        if op is not None:
+            message["operation"] = op
         return handler(message, drop_log)
 
     def _issue(self, message, drop_log):
@@ -319,7 +381,7 @@ class Connector:
         ref = message["id"]
         work_order = message["work_order"]
         operation = int(message.get("operation") or 0)
-        numbers = [float(message.get(k) or 0) for k in ("completed", "rejected", "rework", "scrap")]
+        numbers = [float(message.get(k) or 0) for k in CONFIRM_FIELDS]
         if operation == 30:
             return self._done("Posted", "", "", "Operation 30 is vendor work and is ignored.", ref, work_order, "confirm", drop_log)
         if operation not in (10, 20):
@@ -339,10 +401,9 @@ class Connector:
         allowed = out_kg * (1 + self.weight["loss_allowance"])
         if needed > allowed + 1e-9:
             return self._done("Business Rejected", "E-QTY", "", "Pieces need more steel than was issued.", ref, work_order, "confirm", drop_log)
-        quantities = dict(zip(("completed", "rejected", "rework", "scrap"), numbers))
+        quantities = dict(zip(CONFIRM_FIELDS, numbers))
         key = (ref, work_order, operation)
-        self._confirm_quantities[key] = quantities
-        self.confirmations.append((work_order, operation, tuple(numbers)))
+        self._confirm_store[key] = tuple(numbers)
         return self._done("Posted", "", "", "Confirmation stored. Finished goods unchanged.", ref, work_order, "confirm", drop_log, quantities)
 
     def _kg_out(self, work_order):
