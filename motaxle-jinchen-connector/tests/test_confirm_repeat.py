@@ -73,7 +73,6 @@ class ConfirmRepeatTests(unittest.TestCase):
         self.assertEqual(refused.status, "Business Rejected")
         self.assertEqual(refused.code, "E-QTY")
         self.assertEqual(len(c.confirmations), 0)
-        self.assertNotIn(("CF-10", "WO-2401", 10), c.confirm_keys)
 
         c.process(issue())
         posted = c.process(confirm())
@@ -139,7 +138,11 @@ class ConfirmRepeatTests(unittest.TestCase):
         self.assertEqual(res.code, "")
         self.assertEqual(res.message, "Operation 30 is vendor work and is ignored.")
         self.assertEqual(len(c.confirmations), 0)
-        self.assertEqual(len(c.confirm_keys), 0)
+        # Second time is also treated as vendor ignore rather than duplicate
+        res2 = c.process(confirm("CF-30", operation=30))
+        self.assertEqual(res2.status, "Posted")
+        self.assertEqual(res2.code, "")
+        self.assertEqual(res2.message, "Operation 30 is vendor work and is ignored.")
 
     def test_replay_after_full_return_gives_e_dup(self):
         """Review case 1: After full return (R-ALL), replayed CF-10 returns Posted E-DUP, not E-QTY."""
@@ -150,7 +153,7 @@ class ConfirmRepeatTests(unittest.TestCase):
 
         ret = c.process(give_back("R-ALL", 120))
         self.assertEqual(ret.status, "Posted")
-        self.assertEqual(c._kg_out("WO-2401"), 0.0)
+        self.assertEqual(c.kg()["wip"], 0.0)
 
         replay = c.process(confirm("CF-10", operation=10, completed=100))
         self.assertEqual(replay.status, "Posted")
@@ -177,25 +180,25 @@ class ConfirmRepeatTests(unittest.TestCase):
         self.assertEqual(replay.message, "Already confirmed. Not stored again.")
         self.assertEqual(len(c.confirmations), 1)
 
-    def test_repeat_with_different_quantities_logs_stored_quantities(self):
-        """Review case 3: Repeat with same key but different quantities returns E-DUP and logs stored quantities."""
+    def test_repeat_with_different_quantities_is_refused(self):
+        """Review 4 Must-Fix: Repeat with same key but different quantities returns refusal E-QTY."""
         c = with_metal()
         first = c.process(confirm("CF-10", operation=10, completed=100, rejected=0, rework=0, scrap=0))
         self.assertEqual(first.status, "Posted")
 
-        # Repeat with changed quantities
+        # Repeat with changed quantities returns refusal
         repeat = c.process(confirm("CF-10", operation=10, completed=50, rejected=10, rework=0, scrap=0))
-        self.assertEqual(repeat.status, "Posted")
-        self.assertEqual(repeat.code, "E-DUP")
-        self.assertEqual(repeat.message, "Already confirmed. Not stored again.")
+        self.assertEqual(repeat.status, "Business Rejected")
+        self.assertEqual(repeat.code, "E-QTY")
+        self.assertEqual(repeat.message, "differs from the stored confirmation")
         self.assertEqual(len(c.confirmations), 1)
         self.assertEqual(c.confirmations[0], ("WO-2401", 10, (100.0, 0.0, 0.0, 0.0)))
 
-        confirm_logs = [row for row in c.log if row.kind == "confirm"]
-        self.assertEqual(len(confirm_logs), 2)
-        self.assertEqual(confirm_logs[0].quantities, {"completed": 100.0, "rejected": 0.0, "rework": 0.0, "scrap": 0.0})
-        # The repeated log row must record stored quantities (100, 0, 0, 0), not incoming (50, 10, 0, 0)
-        self.assertEqual(confirm_logs[1].quantities, {"completed": 100.0, "rejected": 0.0, "rework": 0.0, "scrap": 0.0})
+        # Bad quantity on repeat also refused with differs
+        repeat2 = c.process(confirm("CF-10", operation=10, completed=-5, rejected="abc"))
+        self.assertEqual(repeat2.status, "Business Rejected")
+        self.assertEqual(repeat2.code, "E-QTY")
+        self.assertEqual(repeat2.message, "differs from the stored confirmation")
 
     def test_string_float_operation_normalized_and_repeat_is_e_dup(self):
         """String float operation '10.0' is normalized to 10 and not stored twice."""
@@ -251,17 +254,48 @@ class ConfirmRepeatTests(unittest.TestCase):
 
         c_deep = copy.deepcopy(c)
         self.assertEqual(c_deep.confirmations, c.confirmations)
-        self.assertEqual(c_deep.confirm_keys, c.confirm_keys)
+        self.assertEqual(c_deep._confirm_quantities, c._confirm_quantities)
 
         c_pickled = pickle.loads(pickle.dumps(c))
         self.assertEqual(c_pickled.confirmations, c.confirmations)
-        self.assertEqual(c_pickled.confirm_keys, c.confirm_keys)
+        self.assertEqual(c_pickled._confirm_quantities, c._confirm_quantities)
 
         # Confirm that repeat on unpickled connector still detects duplicate
         repeat = c_pickled.process(confirm("CF-10", operation=10, completed=100))
         self.assertEqual(repeat.status, "Posted")
         self.assertEqual(repeat.code, "E-DUP")
         self.assertEqual(len(c_pickled.confirmations), 1)
+
+    def test_list_or_dict_id_is_refused_without_typeerror(self):
+        """Review 4 Must-Fix 1: a list or dict id returns Business Rejected without raising TypeError."""
+        c = Connector()
+        res_list = c.process({'kind': 'confirm', 'id': ['CF'], 'work_order': 'WO-2401', 'operation': 10, 'completed': 1})
+        self.assertEqual(res_list.status, "Business Rejected")
+        self.assertEqual(res_list.code, "E-QTY")
+        self.assertEqual(res_list.message, "Id and work order are required.")
+
+        res_dict = c.process({'kind': 'confirm', 'id': {'val': 'CF'}, 'work_order': 'WO-2401', 'operation': 10, 'completed': 1})
+        self.assertEqual(res_dict.status, "Business Rejected")
+        self.assertEqual(res_dict.code, "E-QTY")
+        self.assertEqual(res_dict.message, "Id and work order are required.")
+
+    def test_non_repeat_bad_operation_check_ordering(self):
+        """Review 4 Comment 3: Unparseable operation falls through to normal order."""
+        c = with_metal()
+        c.process(order("hold", "H-1"))
+
+        # Operation 'ten' on a held order returns E-CLOSED, not E-OP
+        res_held = c.process(confirm("CF-NEW", operation="ten", completed=1))
+        self.assertEqual(res_held.status, "Business Rejected")
+        self.assertEqual(res_held.code, "E-CLOSED")
+
+        # Resume order
+        c.process(order("resume", "RS-1"))
+
+        # With rejected 'x' added on open order, returns E-QTY, not E-OP
+        res_bad_qty = c.process(confirm("CF-NEW2", operation="ten", completed=1, rejected="x"))
+        self.assertEqual(res_bad_qty.status, "Business Rejected")
+        self.assertEqual(res_bad_qty.code, "E-QTY")
 
 
 if __name__ == "__main__":

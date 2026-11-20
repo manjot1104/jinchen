@@ -61,6 +61,23 @@ def _number(value):
     return None
 
 
+def _operation(message):
+    """Normalize operation to an integer if present and valid.
+
+    Returns None if not present or None.
+    Returns False if present but cannot be parsed as a route operation integer.
+    """
+    if "operation" not in message or message["operation"] is None:
+        return None
+    num = _number(message["operation"])
+    try:
+        if num is None or num != int(num):
+            return False
+        return int(num)
+    except (OverflowError, ValueError):
+        return False
+
+
 def require_test_mode(mode, live_password):
     if mode == "test" and live_password:
         raise ConfigError("Test mode refuses to start when a live password is set.")
@@ -100,7 +117,6 @@ class Result:
     code: str
     document: str
     message: str
-
 
 
 @dataclass
@@ -161,7 +177,6 @@ class Connector:
         self.ledger = Ledger()
         self.log = []
         self.confirmations = []
-        self.confirm_keys = set()
         self._confirm_quantities = {}
         self.output_batches = {}
         self.inspection_required = True
@@ -188,24 +203,27 @@ class Connector:
         kind = message.get("kind")
         ref = message.get("id") or ""
         work_order = message.get("work_order") or ""
-        if not ref or not work_order:
-            return self._done("Business Rejected", "E-QTY", "", "Id and work order are required.", ref, work_order, kind or "", drop_log)
+        if not ref or not work_order or not isinstance(ref, str) or not isinstance(work_order, str):
+            return self._done("Business Rejected", "E-QTY", "", "Id and work order are required.", ref if isinstance(ref, str) else "", work_order if isinstance(work_order, str) else "", kind or "", drop_log)
         existing = self.ledger.find(ref, work_order, kind)
         if existing and kind in ("issue", "return", "disposition", "receipt"):
             return self._done("Posted", "E-DUP", existing.name, "Already posted. No second stock entry.", ref, work_order, kind, drop_log)
         if kind == "confirm":
-            op_num = _number(message.get("operation"))
-            try:
-                if op_num is None or op_num != int(op_num):
-                    return self._done("Business Rejected", "E-OP", "", "Operation is not on the demo route.", ref, work_order, kind, drop_log)
-                op_int = int(op_num)
-            except (OverflowError, ValueError):
-                return self._done("Business Rejected", "E-OP", "", "Operation is not on the demo route.", ref, work_order, kind, drop_log)
-            message["operation"] = op_int
-            key = (ref, work_order, op_int)
-            if key in self.confirm_keys:
-                stored_q = self._confirm_quantities.get(key, {})
-                return self._done("Posted", "E-DUP", "", "Already confirmed. Not stored again.", ref, work_order, "confirm", drop_log, quantities=stored_q)
+            op_int = _operation(message)
+            if isinstance(op_int, int):
+                key = (ref, work_order, op_int)
+                if key in self._confirm_quantities:
+                    stored_q = self._confirm_quantities[key]
+                    differs = False
+                    for k in ("completed", "rejected", "rework", "scrap"):
+                        raw_val = message.get(k)
+                        num_val = _number(raw_val) if raw_val is not None else 0.0
+                        if num_val is None or float(num_val) != float(stored_q.get(k, 0.0)):
+                            differs = True
+                            break
+                    if differs:
+                        return self._done("Business Rejected", "E-QTY", "", "differs from the stored confirmation", ref, work_order, "confirm", drop_log)
+                    return self._done("Posted", "E-DUP", "", "Already confirmed. Not stored again.", ref, work_order, "confirm", drop_log, quantities=stored_q)
         if kind in WORK_ORDER_KINDS:
             return self._work_order(message, kind, drop_log)
         state = self.order_state.get(work_order)
@@ -227,13 +245,10 @@ class Connector:
                     return self._done("Business Rejected", "E-QTY", "", "Quantity is not a number.", ref, work_order, kind, drop_log)
                 message[key] = number
         if "operation" in message and message["operation"] is not None:
-            op_num = _number(message["operation"])
-            try:
-                if op_num is None or op_num != int(op_num):
-                    return self._done("Business Rejected", "E-OP", "", "Operation is not on the demo route.", ref, work_order, kind, drop_log)
-                message["operation"] = int(op_num)
-            except (OverflowError, ValueError):
+            op_int = _operation(message)
+            if op_int is False or op_int is None:
                 return self._done("Business Rejected", "E-OP", "", "Operation is not on the demo route.", ref, work_order, kind, drop_log)
+            message["operation"] = op_int
         return handler(message, drop_log)
 
     def _issue(self, message, drop_log):
@@ -326,7 +341,6 @@ class Connector:
             return self._done("Business Rejected", "E-QTY", "", "Pieces need more steel than was issued.", ref, work_order, "confirm", drop_log)
         quantities = dict(zip(("completed", "rejected", "rework", "scrap"), numbers))
         key = (ref, work_order, operation)
-        self.confirm_keys.add(key)
         self._confirm_quantities[key] = quantities
         self.confirmations.append((work_order, operation, tuple(numbers)))
         return self._done("Posted", "", "", "Confirmation stored. Finished goods unchanged.", ref, work_order, "confirm", drop_log, quantities)

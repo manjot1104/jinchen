@@ -98,6 +98,6 @@ Only `kind`, `id` and `work_order`. No stock moves.
 
 | Kind | Effect | When refused |
 |---|---|---|
-| hold | issue, return, confirm, disposition and receipt on the order return E-CLOSED *Work order is on hold.* | E-CLOSED if already cancelled |
+| hold | issue, return, confirm, disposition and receipt on the order return E-CLOSED *Work order is on hold.* (a replayed confirmation returns Posted E-DUP) | E-CLOSED if already cancelled |
 | resume | the order is open again | E-OP *Work order is not on hold.*; E-CLOSED if cancelled |
-| cancel | final; every message returns E-CLOSED *Work order is cancelled.*, and the desk Release is refused | E-QTY *Steel is still out. Return or scrap it before cancel.* |
+| cancel | final; every message returns E-CLOSED *Work order is cancelled.*, and the desk Release is refused (a replayed confirmation returns Posted E-DUP) | E-QTY *Steel is still out. Return or scrap it before cancel.* |
