@@ -1,5 +1,6 @@
 """File-based inbox helpers for the Jinchen POC."""
 
+import inspect
 import json
 import shutil
 from pathlib import Path
@@ -108,50 +109,76 @@ def read_next(
     )
 
     try:
-        message = json.loads(source.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        message = None
-
-    move_to_done = True
-
-    if not isinstance(message, dict):
-        result_data = {
-            "status": "Rejected",
-            "code": "E-ITEM",
-            "document": "",
-            "message": "Inbox file must contain a valid JSON object.",
-        }
-    elif switch_a and message.get("kind") in STOCK_KINDS:
-        result_data = {
-            "status": "Queued",
-            "code": "",
-            "document": "",
-            "message": QUEUED_MESSAGE,
-        }
-        move_to_done = False
-    else:
         try:
-            result = connector.process(
-                message,
-                drop_log="log-fails" in source.name,
-            )
-        except Exception:  # the last guard: the next file must still be read
-            result = None
+            message = json.loads(source.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+            message = None
 
-        if result is None:
+        move_to_done = True
+        kind = message.get("kind") if isinstance(message, dict) else None
+
+        if not isinstance(message, dict) or not isinstance(kind, str):
             result_data = {
-                "status": "Business Rejected",
+                "status": "Rejected",
                 "code": "E-ITEM",
                 "document": "",
-                "message": "File could not be processed.",
+                "message": "Inbox file must contain a valid JSON object.",
+                "logged": True,
             }
+            if hasattr(connector, "record_attempt"):
+                connector.record_attempt(
+                    source.name,
+                    "",
+                    "",
+                    "Business Rejected",
+                    "E-ITEM",
+                    "",
+                    drop_log=False,
+                    quantities=None,
+                    attempt_id=source.name,
+                )
+        elif switch_a and kind in STOCK_KINDS:
+            result_data = {
+                "status": "Queued",
+                "code": "",
+                "document": "",
+                "message": QUEUED_MESSAGE,
+            }
+            move_to_done = False
+            logged = connector.record_queued(source.name, message)
+            result_data["logged"] = logged
         else:
+            drop_log = "log-fails" in source.name
+            try:
+                result = connector.process(
+                    message,
+                    drop_log=drop_log,
+                    attempt_id=source.name,
+                )
+            except TypeError as te:
+                if "unexpected keyword argument 'attempt_id'" in str(te) or "unexpected keyword argument: attempt_id" in str(te):
+                    result = connector.process(
+                        message,
+                        drop_log=drop_log,
+                    )
+                else:
+                    raise
             result_data = {
                 "status": result.status,
                 "code": result.code,
                 "document": result.document,
                 "message": result.message,
+                "logged": not drop_log,
             }
+    except Exception:  # the last guard: the next file must still be read
+        move_to_done = True
+        result_data = {
+            "status": "Business Rejected",
+            "code": "E-ITEM",
+            "document": "",
+            "message": "File could not be processed.",
+            "logged": False,
+        }
 
     done_directory.mkdir(parents=True, exist_ok=True)
     results_directory.mkdir(parents=True, exist_ok=True)
