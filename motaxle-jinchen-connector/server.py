@@ -18,7 +18,8 @@ from urllib.parse import unquote
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from connector.poc import ConfigError, Connector, LOG_FILE_ERROR_MESSAGE
-from connector.inbox import copy_samples, list_inbox, load_config, read_all, DONE_DIR, RESULTS_DIR
+import connector.inbox as inbox_folders
+from connector.inbox import copy_samples, list_inbox, load_config, read_all
 
 HOST = "127.0.0.1"
 PORT = 8765
@@ -82,25 +83,22 @@ class Desk:
                 except OSError:
                     pass
 
-        # Item 4: Move to timestamped archive folder only when log could be cleared
-        if cleared:
-            # Item 20: Use RESULTS_DIR, DONE_DIR, and connector.counter_path
-            res_dir = RESULTS_DIR
-            d_dir = DONE_DIR
-            results_files = [f for f in res_dir.iterdir() if f.is_file() and f.suffix.lower() == ".json"] if res_dir.is_dir() else []
-            done_files = [f for f in d_dir.iterdir() if f.is_file() and f.suffix.lower() == ".json"] if d_dir.is_dir() else []
-            if results_files or done_files:
-                time_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-                archive_dir = d_dir.parent / "archive" / time_str
-                archive_dir.mkdir(parents=True, exist_ok=True)
-                for f in results_files:
+        # Move done and result files to a timestamped archive, only when this
+        # desk keeps a log file and the log was cleared. A desk without a log
+        # file (tests, demo) never touches the inbox folders. The folders are
+        # read at call time, so a patched connector.inbox is respected.
+        if cleared and self.log_path:
+            time_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+            archive_dir = inbox_folders.DONE_DIR.parent / "archive" / time_str
+            for name, folder in (("done", inbox_folders.DONE_DIR), ("results", inbox_folders.RESULTS_DIR)):
+                files = [f for f in folder.iterdir() if f.is_file() and f.suffix.lower() == ".json"] if folder.is_dir() else []
+                if not files:
+                    continue
+                # done/ and results/ hold files with the same names, so each keeps its own folder.
+                (archive_dir / name).mkdir(parents=True, exist_ok=True)
+                for f in files:
                     try:
-                        shutil.move(str(f), str(archive_dir / f.name))
-                    except OSError:
-                        pass
-                for f in done_files:
-                    try:
-                        shutil.move(str(f), str(archive_dir / f.name))
+                        shutil.move(str(f), str(archive_dir / name / f.name))
                     except OSError:
                         pass
 

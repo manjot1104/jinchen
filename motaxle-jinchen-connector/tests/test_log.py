@@ -650,7 +650,7 @@ class LogTests(unittest.TestCase):
             (results_dir / "01-issue.json").write_text('{"document": "STE-0007"}', encoding="utf-8")
             (done_dir / "01-issue.json").write_text('{"id": "J-1"}', encoding="utf-8")
 
-            with mock.patch("server.RESULTS_DIR", results_dir), mock.patch("server.DONE_DIR", done_dir):
+            with mock.patch("connector.inbox.RESULTS_DIR", results_dir), mock.patch("connector.inbox.DONE_DIR", done_dir):
                 desk = Desk(log_path=str(log_file))
                 self.assertEqual(desk.connector.ledger._n, 7)
 
@@ -841,8 +841,8 @@ class LogTests(unittest.TestCase):
             counter_file.write_text("1")
             log_file.write_text('{"name": "STE-0001"}\n')
 
-            with mock.patch("server.RESULTS_DIR", results_dir), \
-                 mock.patch("server.DONE_DIR", done_dir):
+            with mock.patch("connector.inbox.RESULTS_DIR", results_dir), \
+                 mock.patch("connector.inbox.DONE_DIR", done_dir):
                 desk = Desk(log_path=str(log_file))
                 desk.reset()
                 self.assertIn("Job reset. The message log was cleared.", desk.attempts[-1]["message"])
@@ -852,7 +852,56 @@ class LogTests(unittest.TestCase):
                 self.assertTrue(archive_dir.exists())
                 archived_subdirs = list(archive_dir.iterdir())
                 self.assertEqual(len(archived_subdirs), 1)
-                self.assertTrue((archived_subdirs[0] / "res1.json").exists())
+                self.assertTrue((archived_subdirs[0] / "results" / "res1.json").exists())
+                self.assertTrue((archived_subdirs[0] / "done" / "done1.json").exists())
+
+    def test_reset_keeps_a_done_and_a_result_with_the_same_name(self):
+        """A file in done/ and its result in results/ share a name; both are archived."""
+        with tempfile.TemporaryDirectory() as temp:
+            inbox_dir = Path(temp) / "inbox"
+            results_dir, done_dir = inbox_dir / "results", inbox_dir / "done"
+            results_dir.mkdir(parents=True)
+            done_dir.mkdir(parents=True)
+            (results_dir / "01.json").write_text('{"from": "results"}')
+            (done_dir / "01.json").write_text('{"from": "done"}')
+            log_file = inbox_dir / "log.jsonl"
+            log_file.write_text("")
+            with mock.patch("connector.inbox.RESULTS_DIR", results_dir), \
+                 mock.patch("connector.inbox.DONE_DIR", done_dir):
+                Desk(log_path=str(log_file)).reset()
+            [stamp] = list((inbox_dir / "archive").iterdir())
+            self.assertEqual((stamp / "results" / "01.json").read_text(), '{"from": "results"}')
+            self.assertEqual((stamp / "done" / "01.json").read_text(), '{"from": "done"}')
+
+    def test_restart_restores_confirmations_so_a_replay_is_e_dup(self):
+        """US-089 with US-090: a confirmation stored before a restart is still a repeat after it."""
+        with tempfile.TemporaryDirectory() as temp:
+            log_file = Path(temp) / "log.jsonl"
+            desk = Desk(log_path=str(log_file))
+            for action in ("issue-again", "confirm-10", "confirm-20"):
+                self.assertEqual(desk.run(action)["status"], "Posted")
+            before = list(desk.connector.confirmations)
+            desk = Desk(log_path=str(log_file))
+            self.assertEqual(desk.connector.confirmations, before)
+            replay = desk.run("confirm-10")
+            self.assertEqual((replay["status"], replay["code"]), ("Posted", "E-DUP"))
+            self.assertEqual(len(desk.connector.confirmations), 2)
+
+    def test_reset_without_a_log_file_leaves_the_inbox_folders_alone(self):
+        """A desk with no log file (tests, demo) never archives the inbox folders."""
+        with tempfile.TemporaryDirectory() as temp:
+            inbox_dir = Path(temp) / "inbox"
+            results_dir, done_dir = inbox_dir / "results", inbox_dir / "done"
+            results_dir.mkdir(parents=True)
+            done_dir.mkdir(parents=True)
+            (results_dir / "01.json").write_text("{}")
+            (done_dir / "01.json").write_text("{}")
+            with mock.patch("connector.inbox.RESULTS_DIR", results_dir), \
+                 mock.patch("connector.inbox.DONE_DIR", done_dir):
+                Desk().reset()
+            self.assertTrue((results_dir / "01.json").exists())
+            self.assertTrue((done_dir / "01.json").exists())
+            self.assertFalse((inbox_dir / "archive").exists())
 
     def test_desk_reset_skips_archive_when_log_locked(self):
         """Must-fix Item 4: Reset skips archive move when log clear fails."""
@@ -866,8 +915,8 @@ class LogTests(unittest.TestCase):
             (results_dir / "res1.json").write_text("{}")
             log_file.write_text('{"name": "STE-0001"}\n')
 
-            with mock.patch("server.RESULTS_DIR", results_dir), \
-                 mock.patch("server.DONE_DIR", done_dir):
+            with mock.patch("connector.inbox.RESULTS_DIR", results_dir), \
+                 mock.patch("connector.inbox.DONE_DIR", done_dir):
                 desk = Desk(log_path=str(log_file))
                 with mock.patch("os.remove", side_effect=OSError("locked")), \
                      mock.patch("builtins.open", side_effect=OSError("Permission denied")):
@@ -973,8 +1022,8 @@ class LogTests(unittest.TestCase):
             done_dir.mkdir(parents=True)
             (results_dir / "01.json").write_text('{"document": "STE-0005"}', encoding="utf-8")
 
-            with mock.patch("server.RESULTS_DIR", results_dir), \
-                 mock.patch("server.DONE_DIR", done_dir):
+            with mock.patch("connector.inbox.RESULTS_DIR", results_dir), \
+                 mock.patch("connector.inbox.DONE_DIR", done_dir):
                 desk = Desk(log_path=str(log_file))
                 self.assertEqual(desk.connector.ledger._n, 5)
 
