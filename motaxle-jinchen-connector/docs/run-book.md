@@ -58,3 +58,42 @@ On the Work order screen:
 ## Clean up after a run
 
 `inbox/in/`, `inbox/done/` and `inbox/results/` are local. Do not commit them. To start the inbox fresh, empty those three folders by hand; Copy samples only copies when `inbox/in/` holds no JSON file.
+
+## Notification rules
+
+The connector can generate notifications for unresolved failures and specific
+order events. Notification settings are optional and use these defaults:
+
+| Setting | Default |
+|---|---:|
+| Old failure threshold | 4 working hours |
+| Working hours | 09:00–17:00 |
+| Working days | Monday–Friday |
+| E-STOCK threshold | 3 events |
+
+### Notification triggers
+
+- **Old unresolved failure:** Notify Support and Stores Manager after the
+  configured number of working hours.
+- **E-AMEND:** Notify Planner once for each eligible row.
+- **Repeated E-STOCK:** Notify Stores when the configured number of distinct
+  E-STOCK events occurs for the same work order on the same date.
+- **Posted rows:** Rows with status `Posted` do not generate notifications.
+  A matching later Posted row also suppresses the old-failure alert.
+
+### Delivery and safety
+
+- Notifications contain safe metadata only. Raw payload text and secrets must
+  never be included.
+- Notification keys prevent duplicate alerts.
+- Sent notification state can be persisted across restarts.
+- An optional JSONL mailbox can store notifications. Mailbox writes are atomic.
+- A notification is marked as sent only after mailbox delivery succeeds.
+
+### Configuration
+
+The optional `notifications` configuration block supports:
+`old_failure_working_hours`, `work_start_hour`, `work_end_hour`,
+`working_weekdays`, and `estock_threshold`.
+
+Invalid notification settings are rejected during configuration validation.

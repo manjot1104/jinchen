@@ -8,6 +8,7 @@ import tempfile
 from pathlib import Path
 
 from connector.poc import DEFAULT_WEIGHT, ConfigError, require_test_mode
+from connector.notifications import validate_notifications_config
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -39,7 +40,12 @@ def load_config(path=None):
     mode = data.get("mode")
     live_password = data.get("live_password") or ""
     require_test_mode(mode, live_password)
-    return {"mode": mode, "live_password": live_password, "weight": _weight(data.get("weight"))}
+    return {
+        "mode": mode,
+        "live_password": live_password,
+        "weight": _weight(data.get("weight")),
+        "notifications": validate_notifications_config(data.get("notifications")),
+    }
 
 
 WEIGHT_SENTENCE = "config.json weight needs kg_per_piece above 0 and loss_allowance from 0 to 1."
