@@ -437,6 +437,21 @@ class ConfirmRepeatTests(unittest.TestCase):
         self.assertEqual(confirm_logs[1].quantities, {})
 
 
+class ConfirmationsAreReadOnly(unittest.TestCase):
+    def test_confirmations_cannot_be_assigned(self):
+        c = Connector()
+        with self.assertRaises(AttributeError):
+            c.confirmations = [("WO-2401", 10, (1.0, 0.0, 0.0, 0.0))]
+
+    def test_missing_work_order_still_logs_the_id(self):
+        c = Connector()
+        result = c.process({"kind": "confirm", "id": "CF-9", "operation": 10, "completed": 1})
+        self.assertEqual((result.status, result.code), ("Business Rejected", "E-QTY"))
+        self.assertEqual(result.message, "Id and work order are required.")
+        self.assertEqual(c.log[-1].ref, "CF-9")
+        self.assertEqual(c.log[-1].work_order, "")
+
+
 if __name__ == "__main__":
     unittest.main()
 

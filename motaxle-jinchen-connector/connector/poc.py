@@ -212,12 +212,12 @@ class Connector:
 
     @property
     def confirmations(self):
-        return [(wo, op, nums) for (ref, wo, op), nums in self._confirm_store.items()]
+        """Stored confirmations as (work_order, operation, numbers), in arrival order.
 
-    @confirmations.setter
-    def confirmations(self, val):
-        if not val:
-            self._confirm_store.clear()
+        Read-only: a confirmation is stored only by _confirm, keyed by
+        (id, work_order, operation) in _confirm_store.
+        """
+        return [(wo, op, nums) for (ref, wo, op), nums in self._confirm_store.items()]
 
     @property
     def _confirm_quantities(self):
@@ -246,7 +246,10 @@ class Connector:
         wo_raw = message.get("work_order")
 
         if ref_raw is None or wo_raw is None or ref_raw == "" or wo_raw == "":
-            return self._done("Business Rejected", "E-QTY", "", "Id and work order are required.", "", "", kind if isinstance(kind, str) else "", drop_log)
+            # Log whichever of the two is present, so the row can still be traced.
+            ref_logged = str(ref_raw) if isinstance(ref_raw, (str, int, float)) and not isinstance(ref_raw, bool) else ""
+            wo_logged = str(wo_raw) if isinstance(wo_raw, (str, int, float)) and not isinstance(wo_raw, bool) else ""
+            return self._done("Business Rejected", "E-QTY", "", "Id and work order are required.", ref_logged, wo_logged, kind if isinstance(kind, str) else "", drop_log)
         if (
             isinstance(ref_raw, (bool, list, dict, set, tuple))
             or isinstance(wo_raw, (bool, list, dict, set, tuple))
