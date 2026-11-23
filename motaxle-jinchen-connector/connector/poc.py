@@ -256,6 +256,28 @@ class Ledger:
 LOG_FILE_ERROR_MESSAGE = "The log file could not be written."
 
 
+CONNECTOR_WEIGHT_SENTENCE = (
+    "Connector weight needs kg_per_piece above 0 and loss_allowance from 0 to 1."
+)
+
+
+def _validate_connector_weight(block):
+    if block is None:
+        return dict(DEFAULT_WEIGHT)
+    if not isinstance(block, dict):
+        raise ConfigError(CONNECTOR_WEIGHT_SENTENCE)
+    weight = dict(DEFAULT_WEIGHT)
+    weight.update(block)
+    per_piece = weight["kg_per_piece"]
+    allowance = weight["loss_allowance"]
+    for value in (per_piece, allowance):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ConfigError(CONNECTOR_WEIGHT_SENTENCE)
+    if per_piece <= 0 or not 0 <= allowance <= 1:
+        raise ConfigError(CONNECTOR_WEIGHT_SENTENCE)
+    return {"kg_per_piece": float(per_piece), "loss_allowance": float(allowance)}
+
+
 class Connector:
     """Connector processes Jinchen messages against ERPNext stock.
     Note: not thread-safe; use external synchronization for concurrent calls.
@@ -263,9 +285,7 @@ class Connector:
     def __init__(self, mode="test", live_password="", weight=None, log_path=None, results_dir=None):
         require_test_mode(mode, live_password)
         self.mode = mode
-        self.weight = dict(DEFAULT_WEIGHT)
-        if weight:
-            self.weight.update(weight)
+        self.weight = _validate_connector_weight(weight)
         self.log_path = log_path
         self.ledger_path = Path(log_path).with_name("ledger.jsonl") if log_path else None
         self.counter_path = Path(log_path).with_name(".ste_counter") if log_path else None

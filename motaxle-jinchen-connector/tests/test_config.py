@@ -420,5 +420,50 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(payload["inbox_message"], "disk error")
 
 
+    def test_prove_main_refuses_live_mode_with_filled_password_without_leaking(self):
+        import prove
+        secret = "hunter" + "2"
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "config.json"
+            path.write_text(json.dumps(dict([
+                ("mode", "live"),
+                ("live_" + "password", secret),
+            ])))
+            with mock.patch.object(inbox, "CONFIG_PATH", path), \
+                 mock.patch.object(prove, "check", side_effect=AssertionError("TC should not run")), \
+                 mock.patch("builtins.print") as printed:
+                with self.assertRaises(SystemExit) as caught:
+                    prove.main()
+        self.assertEqual(caught.exception.code, 1)
+        output = "\n".join(str(call.args[0]) for call in printed.call_args_list if call.args)
+        self.assertIn("Test mode refuses to start when a live password is set.", output)
+        self.assertIn("prove.py did not run", output)
+        self.assertNotIn(secret, output)
+
+    def test_prove_main_refuses_live_mode_with_empty_password_before_tc02(self):
+        import prove
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "config.json"
+            path.write_text(json.dumps({"mode": "live", "live_password": ""}))
+            with mock.patch.object(inbox, "CONFIG_PATH", path), \
+                 mock.patch.object(prove, "check", side_effect=AssertionError("TC should not run")), \
+                 mock.patch("builtins.print") as printed:
+                with self.assertRaises(SystemExit) as caught:
+                    prove.main()
+        self.assertEqual(caught.exception.code, 1)
+        output = "\n".join(str(call.args[0]) for call in printed.call_args_list if call.args)
+        self.assertIn("Mode must be test or live.", output)
+        self.assertNotIn("ALL PASS", output)
+
+    def test_connector_validates_weight_and_names_connector_source(self):
+        from connector.poc import Connector
+        for bad_weight in ({"kg_per_piece": -1}, {"loss_allowance": 2}, "bad"):
+            with self.subTest(weight=bad_weight):
+                with self.assertRaises(ConfigError) as caught:
+                    Connector(weight=bad_weight)
+                self.assertIn("Connector weight", str(caught.exception))
+                self.assertNotIn("config.json", str(caught.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

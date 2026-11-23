@@ -88,6 +88,15 @@ def main():
         print("prove.py did not run")
         raise SystemExit(1)
 
+    if config.get("live_password"):
+        print("Test mode refuses to start when a live password is set.")
+        print("prove.py did not run")
+        raise SystemExit(1)
+    if config.get("mode") != "test":
+        print("Mode must be test or live.")
+        print("prove.py did not run")
+        raise SystemExit(1)
+
     weight = config["weight"]
     print(f"Config weight: kg_per_piece={weight['kg_per_piece']}, loss_allowance={weight['loss_allowance']}")
 
