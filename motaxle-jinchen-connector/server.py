@@ -35,7 +35,9 @@ LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "inbox", "lo
 
 
 class Desk:
-    def __init__(self, weight=None, log_path=None):
+    def __init__(self, weight=None, log_path=None, reload_config=None):
+        self._fixed_weight = weight
+        self._reload_config = (weight is None) if reload_config is None else bool(reload_config)
         self.weight = weight
         self.log_path = log_path
         self.connector = Connector(weight=self.weight, log_path=self.log_path)
@@ -63,6 +65,15 @@ class Desk:
         return text
 
     def reset(self):
+        config_error = None
+        if self._reload_config:
+            try:
+                self.weight = load_config()["weight"]
+            except (ConfigError, OSError) as exc:
+                config_error = str(exc)
+        else:
+            self.weight = self._fixed_weight
+
         cleared = True
         if self.log_path and os.path.exists(self.log_path):
             try:
@@ -120,11 +131,16 @@ class Desk:
         self.switch_a = False
         self.switch_b = False
         self.released = False
-        msg = (
-            "Job reset. The message log was cleared."
-            if cleared
-            else "Job reset. The message log could not be cleared. A restart will bring the old state back."
-        )
+        if config_error is not None:
+            msg = f"Job reset. config.json was not loaded: {config_error}"
+            if not cleared:
+                msg += " The message log could not be cleared. A restart will bring the old state back."
+        else:
+            msg = (
+                "Job reset. The message log was cleared."
+                if cleared
+                else "Job reset. The message log could not be cleared. A restart will bring the old state back."
+            )
         self.attempts.append({
             "id": "reset",
             "status": "Posted",
@@ -141,16 +157,20 @@ class Desk:
 
     def read_inbox(self):
         """Read inbox files through the desk's current Switch A setting."""
-        files = list_inbox()
-        results = read_all(self.connector, switch_a=self.switch_a)
+        try:
+            pairs = read_all(self.connector, switch_a=self.switch_a)
+        except (ConfigError, OSError) as exc:
+            payload = self.payload(None)
+            payload["inbox_message"] = str(exc)
+            return payload
 
         last_result = None
-        for source, result in zip(files, results):
+        for final_name, result in pairs:
             # Item 15: Only add to attempts if written to log
             if not result.get("logged", True):
                 continue
             row = {
-                "id": source.name,
+                "id": final_name,
                 "status": result["status"],
                 "code": result["code"],
                 "document": result["document"],
@@ -161,8 +181,8 @@ class Desk:
 
         payload = self.payload(last_result)
         inbox_msg = (
-            f"Read {len(results)} inbox file(s)."
-            if results
+            f"Read {len(pairs)} inbox file(s)."
+            if pairs
             else "Inbox is empty."
         )
         payload["inbox_message"] = self._take_log_error(inbox_msg)
@@ -1135,7 +1155,7 @@ def main():
         print(str(exc), flush=True)
         print("The desk did not start.", flush=True)
         return 1
-    DESK = Desk(weight=config["weight"], log_path=LOG_PATH)
+    DESK = Desk(weight=config["weight"], log_path=LOG_PATH, reload_config=True)
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     print("Open http://%s:%d" % (HOST, PORT), flush=True)
     print("Ctrl+C stops it.", flush=True)

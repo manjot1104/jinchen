@@ -27,7 +27,7 @@ If the desk does not start:
 | *config.json weight needs kg_per_piece above 0 and loss_allowance from 0 to 1.* | Fix the `weight` block, or remove it to use 1.20 and 0.05. |
 | `Address already in use` | Another desk holds 8765. `lsof -i :8765` names it. Stop that one, not a stranger's process. |
 
-**Reset job** on the Today screen clears the ledger, the message log, the STE counter, and moves previous files in `inbox/done/` and `inbox/results/` to `inbox/archive/<time>/done/` and `inbox/archive/<time>/results/` when the message log is cleared, so document numbering starts fresh from STE-0001.
+**Reset job** on the Today screen clears the ledger, the message log, the STE counter, reloads `config.json` (including updated `weight` settings), and moves previous files in `inbox/done/` and `inbox/results/` to `inbox/archive/<time>/done/` and `inbox/archive/<time>/results/` when the message log is cleared, so document numbering starts fresh from STE-0001.
 
 ## The two switches
 
@@ -42,7 +42,7 @@ A replay must never move stock twice. This is how to show it:
 1. Read the nine samples once (Inbox: **Copy samples**, then **Read inbox**). The tiles read raw 384, hold 96, entries 7.
 2. Copy one file back from `inbox/done/` to `inbox/in/`, for example `08-receipt-C-1.json`.
 3. Press **Read inbox**. The result is Posted with E-DUP and document STE-0006. Hold stays 96 and there are still 7 entries.
-4. `inbox/results/08-receipt-C-1.json` is overwritten with the E-DUP result. That is expected.
+4. `inbox/results/08-receipt-C-1.dup1.json` records the E-DUP result while `inbox/results/08-receipt-C-1.json` stays as it was, and `inbox/done/` keeps both `08-receipt-C-1.json` and `08-receipt-C-1.dup1.json`.
 
 Replay on the desk: **Send J-100 again**, **Send R-1 again** and **Send C-1 again** do the same from buttons.
 

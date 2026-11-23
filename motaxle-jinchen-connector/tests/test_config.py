@@ -132,6 +132,338 @@ class ConfigTests(unittest.TestCase):
         built.assert_called_once_with((server.HOST, server.PORT), server.Handler)
         built.return_value.serve_forever.assert_called_once()
 
+    def test_prove_main_refuses_a_filled_password(self):
+        import prove
+        with tempfile.TemporaryDirectory() as temp:
+            path = write_config(temp, "test", "live-secret")
+            with mock.patch.object(inbox, "CONFIG_PATH", path), \
+                 mock.patch("builtins.print") as printed:
+                with self.assertRaises(SystemExit) as caught:
+                    prove.main()
+        self.assertEqual(caught.exception.code, 1)
+        lines = [call.args[0] for call in printed.call_args_list if call.args]
+        self.assertEqual(lines, [PASSWORD_SENTENCE, "prove.py did not run"])
+        self.assertFalse(any(str(line).startswith("TC-02") for line in lines))
+        self.assertNotIn("live-secret", " ".join(lines))
+
+    def test_prove_main_refuses_a_bad_mode(self):
+        import prove
+        with tempfile.TemporaryDirectory() as temp:
+            path = write_config(temp, "demo", "")
+            with mock.patch.object(inbox, "CONFIG_PATH", path), \
+                 mock.patch("builtins.print") as printed:
+                with self.assertRaises(SystemExit) as caught:
+                    prove.main()
+        self.assertEqual(caught.exception.code, 1)
+        lines = [call.args[0] for call in printed.call_args_list if call.args]
+        self.assertEqual(lines, [MODE_SENTENCE, "prove.py did not run"])
+        self.assertFalse(any(str(line).startswith("TC-02") for line in lines))
+
+    def test_invalid_json_file_keeps_file_specific_error_message(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "config.json"
+            path.write_text("{not-json", encoding="utf-8")
+            with self.assertRaises(ConfigError) as caught:
+                load_config(path)
+        self.assertEqual(str(caught.exception), "config.json is not a valid JSON object.")
+
+    def test_prove_main_propagates_validated_config_and_revalidates_on_read_all(self):
+        import prove
+        real_prove_load = prove.load_config
+        real_inbox_load = inbox.load_config
+        real_read_all = read_all
+        read_all_calls = []
+
+        def spy_read_all(*args, **kwargs):
+            read_all_calls.append((args, kwargs))
+            return real_read_all(*args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as temp:
+            path = write_config(temp, "test", "")
+            with mock.patch.object(inbox, "CONFIG_PATH", path), \
+                 mock.patch.object(prove, "load_config", wraps=real_prove_load) as mocked_prove_load, \
+                 mock.patch.object(inbox, "load_config", wraps=real_inbox_load) as mocked_inbox_load, \
+                 mock.patch.object(prove, "read_all", side_effect=spy_read_all), \
+                 mock.patch("builtins.print"):
+                prove.main()
+
+        self.assertEqual(mocked_prove_load.call_count, 1)
+        self.assertEqual(mocked_inbox_load.call_count, 2)
+        self.assertEqual(len(read_all_calls), 2)
+        for args, kwargs in read_all_calls:
+            self.assertNotIn("config", kwargs)
+            self.assertEqual(args[0].weight, {"kg_per_piece": 1.2, "loss_allowance": 0.05})
+
+    def test_prove_run_folder_isolates_samples_and_examples(self):
+        import prove
+        with tempfile.TemporaryDirectory() as temp:
+            path = write_config(temp, "test", "")
+            with mock.patch.object(inbox, "CONFIG_PATH", path):
+                with prove.run_folder(PROJECT / "inbox" / "samples") as (connector, results, results_dir):
+                    self.assertEqual(len(results), 9)
+                    self.assertEqual(connector.kg(), {"raw": 384.0, "wip": 116.0})
+                    self.assertEqual(len(list(results_dir.glob("*.json"))), 9)
+                with prove.run_folder(PROJECT / "inbox" / "examples") as (connector, results, results_dir):
+                    self.assertEqual(len(results), 8)
+                    self.assertEqual(connector.kg(), {"raw": 500.0, "wip": 0.0})
+                    self.assertEqual(len(connector.ledger.entries), 0)
+                    self.assertEqual(connector.ledger.capa, 0)
+
+    def test_prove_main_fails_with_tighter_loss_allowance(self):
+        import prove
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "config.json"
+            path.write_text(json.dumps({
+                "mode": "test",
+                "live_password": "",
+                "weight": {"kg_per_piece": 1.2, "loss_allowance": 0.02},
+            }))
+            with mock.patch.object(inbox, "CONFIG_PATH", path), \
+                 mock.patch("builtins.print") as printed:
+                with self.assertRaises(SystemExit) as caught:
+                    prove.main()
+        self.assertEqual(caught.exception.code, 1)
+        output = "\n".join(str(call.args[0]) for call in printed.call_args_list if call.args)
+        self.assertIn("TC-12 FAIL", output)
+        self.assertNotIn("ALL PASS", output)
+
+    def test_prove_main_fails_with_heavier_kg_per_piece(self):
+        import prove
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "config.json"
+            path.write_text(json.dumps({
+                "mode": "test",
+                "live_password": "",
+                "weight": {"kg_per_piece": 1.5, "loss_allowance": 0.05},
+            }))
+            with mock.patch.object(inbox, "CONFIG_PATH", path), \
+                 mock.patch("builtins.print") as printed:
+                with self.assertRaises(SystemExit) as caught:
+                    prove.main()
+        self.assertEqual(caught.exception.code, 1)
+        output = "\n".join(str(call.args[0]) for call in printed.call_args_list if call.args)
+        self.assertIn("TC-12 FAIL", output)
+        self.assertNotIn("ALL PASS", output)
+
+    def test_prove_main_passes_with_consistent_custom_weight(self):
+        import prove
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "config.json"
+            path.write_text(json.dumps({
+                "mode": "test",
+                "live_password": "",
+                "weight": {"kg_per_piece": 1.5, "loss_allowance": 0.30},
+            }))
+            with mock.patch.object(inbox, "CONFIG_PATH", path), \
+                 mock.patch("builtins.print") as printed:
+                prove.main()
+        output = "\n".join(str(call.args[0]) for call in printed.call_args_list if call.args)
+        self.assertIn("Config weight: kg_per_piece=1.5, loss_allowance=0.3", output)
+        self.assertIn("ALL PASS", output)
+
+    def test_prove_main_fails_if_a_registered_check_is_missing(self):
+        import prove
+        with tempfile.TemporaryDirectory() as temp:
+            path = write_config(temp, "test", "")
+            with mock.patch.object(inbox, "CONFIG_PATH", path), \
+                 mock.patch.object(prove, "CHECKS", prove.CHECKS + ("14",)), \
+                 mock.patch("builtins.print") as printed:
+                with self.assertRaises(SystemExit) as caught:
+                    prove.main()
+        self.assertEqual(caught.exception.code, 1)
+        lines = [str(call.args[0]) for call in printed.call_args_list if call.args]
+        self.assertNotIn("ALL PASS", lines)
+        self.assertTrue(any(line.startswith("NOT PASS:") for line in lines))
+
+    def test_prove_main_fails_if_an_unexpected_check_id_runs(self):
+        import prove
+        real_check = prove.check
+
+        def renumbered_check(number, description, test):
+            mapped = "99" if number == "13" else number
+            return real_check(mapped, description, test)
+
+        with tempfile.TemporaryDirectory() as temp:
+            path = write_config(temp, "test", "")
+            with mock.patch.object(inbox, "CONFIG_PATH", path), \
+                 mock.patch.object(prove, "check", side_effect=renumbered_check), \
+                 mock.patch("builtins.print") as printed:
+                with self.assertRaises(SystemExit) as caught:
+                    prove.main()
+        self.assertEqual(caught.exception.code, 1)
+        lines = [str(call.args[0]) for call in printed.call_args_list if call.args]
+        self.assertNotIn("ALL PASS", lines)
+        self.assertTrue(any(line.startswith("NOT PASS:") for line in lines))
+
+    def test_prove_main_fails_if_a_check_id_runs_twice(self):
+        import prove
+        real_check = prove.check
+
+        def duplicate_check(number, description, test):
+            mapped = "12" if number == "13" else number
+            return real_check(mapped, description, test)
+
+        with tempfile.TemporaryDirectory() as temp:
+            path = write_config(temp, "test", "")
+            with mock.patch.object(inbox, "CONFIG_PATH", path), \
+                 mock.patch.object(prove, "check", side_effect=duplicate_check), \
+                 mock.patch("builtins.print") as printed:
+                with self.assertRaises(SystemExit) as caught:
+                    prove.main()
+        self.assertEqual(caught.exception.code, 1)
+        lines = [str(call.args[0]) for call in printed.call_args_list if call.args]
+        self.assertNotIn("ALL PASS", lines)
+        self.assertTrue(any(line.startswith("NOT PASS:") and "duplicates=['12']" in line for line in lines))
+
+    def test_non_dict_config_file_raises_config_json_message(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "config.json"
+            path.write_text("[]", encoding="utf-8")
+            with self.assertRaises(ConfigError) as caught:
+                load_config(path)
+        self.assertEqual(str(caught.exception), "config.json is not a valid JSON object.")
+
+    def test_desk_read_inbox_catches_config_error_and_returns_inbox_message(self):
+        import server
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "config.json"
+            path.write_text(json.dumps({
+                "mode": "test",
+                "live_password": "",
+                "weight": {"kg_per_piece": 1.2, "loss_allowance": 0.1},
+            }))
+            with mock.patch.object(inbox, "CONFIG_PATH", path):
+                desk = server.Desk()
+                path.write_text(json.dumps({
+                    "mode": "demo",
+                    "live_password": "",
+                    "weight": {"kg_per_piece": 1.2, "loss_allowance": 0.1},
+                }))
+                payload = desk.read_inbox()
+        self.assertEqual(payload["inbox_message"], "Mode must be test or live.")
+
+    def test_desk_reset_reloads_config_weight(self):
+        import server
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "config.json"
+            path.write_text(json.dumps({
+                "mode": "test",
+                "live_password": "",
+                "weight": {"kg_per_piece": 1.2, "loss_allowance": 0.05},
+            }))
+            with mock.patch.object(inbox, "CONFIG_PATH", path):
+                desk = server.Desk()
+                self.assertEqual(desk.connector.weight, {"kg_per_piece": 1.2, "loss_allowance": 0.05})
+                path.write_text(json.dumps({
+                    "mode": "test",
+                    "live_password": "",
+                    "weight": {"kg_per_piece": 1.5, "loss_allowance": 0.1},
+                }))
+                desk.reset()
+        self.assertEqual(desk.weight, {"kg_per_piece": 1.5, "loss_allowance": 0.1})
+        self.assertEqual(desk.connector.weight, {"kg_per_piece": 1.5, "loss_allowance": 0.1})
+
+    def test_desk_read_inbox_pairs_filenames_from_read_all(self):
+        import server
+        with tempfile.TemporaryDirectory() as temp:
+            path = write_config(temp, "test", "")
+            with mock.patch.object(inbox, "CONFIG_PATH", path), \
+                 mock.patch.object(
+                     server,
+                     "read_all",
+                     return_value=[
+                         ("first.json", {"status": "POSTED", "code": "", "document": "DOC-1", "message": "ok"}),
+                         ("second.json", {"status": "FAILED", "code": "E-QTY", "document": "", "message": "bad qty"}),
+                     ],
+                 ) as mocked_read_all:
+                desk = server.Desk()
+                payload = desk.read_inbox()
+        mocked_read_all.assert_called_once_with(desk.connector, switch_a=desk.switch_a)
+        self.assertEqual(payload["inbox_message"], "Read 2 inbox file(s).")
+        self.assertEqual([row["id"] for row in desk.attempts], ["first.json", "second.json"])
+
+    def test_desk_reset_with_reload_config_flag_reloads_and_reports_bad_config(self):
+        import server
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "config.json"
+            path.write_text(json.dumps({
+                "mode": "test",
+                "live_password": "",
+                "weight": {"kg_per_piece": 1.2, "loss_allowance": 0.05},
+            }))
+            with mock.patch.object(inbox, "CONFIG_PATH", path):
+                desk = server.Desk(weight={"kg_per_piece": 1.2, "loss_allowance": 0.05}, reload_config=True)
+                path.write_text(json.dumps({
+                    "mode": "test",
+                    "live_password": "",
+                    "weight": {"kg_per_piece": 1.6, "loss_allowance": 0.1},
+                }))
+                desk.reset()
+                self.assertEqual(desk.weight, {"kg_per_piece": 1.6, "loss_allowance": 0.1})
+                path.write_text(json.dumps({
+                    "mode": "test",
+                    "live_password": "",
+                    "weight": {"kg_per_piece": 0, "loss_allowance": 0.1},
+                }))
+                desk.reset()
+                self.assertEqual(desk.weight, {"kg_per_piece": 1.6, "loss_allowance": 0.1})
+                self.assertIn("Job reset. config.json was not loaded:", desk.attempts[-1]["message"])
+
+    def test_desk_read_inbox_catches_oserror(self):
+        import server
+        with tempfile.TemporaryDirectory() as temp:
+            path = write_config(temp, "test", "")
+            with mock.patch.object(inbox, "CONFIG_PATH", path), \
+                 mock.patch.object(server, "read_all", side_effect=OSError("disk error")):
+                desk = server.Desk()
+                payload = desk.read_inbox()
+        self.assertEqual(payload["inbox_message"], "disk error")
+
+
+    def test_prove_main_refuses_live_mode_with_filled_password_without_leaking(self):
+        import prove
+        secret = "hunter" + "2"
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "config.json"
+            path.write_text(json.dumps(dict([
+                ("mode", "live"),
+                ("live_" + "password", secret),
+            ])))
+            with mock.patch.object(inbox, "CONFIG_PATH", path), \
+                 mock.patch.object(prove, "check", side_effect=AssertionError("TC should not run")), \
+                 mock.patch("builtins.print") as printed:
+                with self.assertRaises(SystemExit) as caught:
+                    prove.main()
+        self.assertEqual(caught.exception.code, 1)
+        output = "\n".join(str(call.args[0]) for call in printed.call_args_list if call.args)
+        self.assertIn("Test mode refuses to start when a live password is set.", output)
+        self.assertIn("prove.py did not run", output)
+        self.assertNotIn(secret, output)
+
+    def test_prove_main_refuses_live_mode_with_empty_password_before_tc02(self):
+        import prove
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "config.json"
+            path.write_text(json.dumps({"mode": "live", "live_password": ""}))
+            with mock.patch.object(inbox, "CONFIG_PATH", path), \
+                 mock.patch.object(prove, "check", side_effect=AssertionError("TC should not run")), \
+                 mock.patch("builtins.print") as printed:
+                with self.assertRaises(SystemExit) as caught:
+                    prove.main()
+        self.assertEqual(caught.exception.code, 1)
+        output = "\n".join(str(call.args[0]) for call in printed.call_args_list if call.args)
+        self.assertIn("Mode must be test or live.", output)
+        self.assertNotIn("ALL PASS", output)
+
+    def test_connector_validates_weight_and_names_connector_source(self):
+        from connector.poc import Connector
+        for bad_weight in ({"kg_per_piece": -1}, {"loss_allowance": 2}, "bad"):
+            with self.subTest(weight=bad_weight):
+                with self.assertRaises(ConfigError) as caught:
+                    Connector(weight=bad_weight)
+                self.assertIn("Connector weight", str(caught.exception))
+                self.assertNotIn("config.json", str(caught.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

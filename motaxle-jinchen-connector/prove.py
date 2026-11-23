@@ -1,12 +1,24 @@
+from contextlib import contextmanager
+import json
+from pathlib import Path
+import tempfile
+
+from connector.inbox import copy_samples, load_config, read_all
 from connector.poc import ConfigError, Connector, require_test_mode
 
+PROJECT = Path(__file__).resolve().parent
+REPO_INBOX = PROJECT / "inbox"
 
+
+CHECKS = ("02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12", "13")
 passed = 0
 failed = 0
+ran_checks = []
 
 
 def check(number, description, test):
     global passed, failed
+    ran_checks.append(number)
     try:
         test()
         passed += 1
@@ -41,7 +53,53 @@ def return_message(ref="R-1", qty=4):
     }
 
 
+@contextmanager
+def run_folder(src_dir, config=None):
+    """Copy JSON files from src_dir into an isolated temp inbox and run read_all."""
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp)
+        inbox_dir = root / "in"
+        done_dir = root / "done"
+        results_dir = root / "results"
+        inbox_dir.mkdir()
+        copy_samples(inbox_dir, src_dir)
+
+        weight = config.get("weight") if isinstance(config, dict) else None
+        connector = Connector(weight=weight)
+        results = read_all(
+            connector,
+            switch_a=False,
+            inbox_dir=inbox_dir,
+            done_dir=done_dir,
+            results_dir=results_dir,
+        )
+        yield connector, results, results_dir
+
+
 def main():
+    global passed, failed, ran_checks
+    passed = 0
+    failed = 0
+    ran_checks = []
+    try:
+        config = load_config()
+    except ConfigError as exc:
+        print(str(exc))
+        print("prove.py did not run")
+        raise SystemExit(1)
+
+    if config.get("live_password"):
+        print("Test mode refuses to start when a live password is set.")
+        print("prove.py did not run")
+        raise SystemExit(1)
+    if config.get("mode") != "test":
+        print("Mode must be test or live.")
+        print("prove.py did not run")
+        raise SystemExit(1)
+
+    weight = config["weight"]
+    print(f"Config weight: kg_per_piece={weight['kg_per_piece']}, loss_allowance={weight['loss_allowance']}")
+
     def tc02():
         try:
             require_test_mode("test", "live-secret")
@@ -49,12 +107,12 @@ def main():
             pass
         else:
             raise AssertionError("live password was not refused")
-        c = Connector()
-        equal(c.kg(), {"raw": 500.0, "wip": 0.0}, "initial stock")
+        tc02_connector = Connector(weight=weight)
+        equal(tc02_connector.kg(), {"raw": 500.0, "wip": 0.0}, "initial stock")
 
     check("02", "live password refused; empty-password test mode starts", tc02)
 
-    c = Connector()
+    c = Connector(weight=weight)
     first_issue = {}
 
     def tc03():
@@ -124,7 +182,7 @@ def main():
         equal(c.kg(), {"raw": 384.0, "wip": 116.0}, "raw/WIP stock")
         equal(len(c.ledger.entries), 5, "entries after dispositions")
 
-        control = Connector()
+        control = Connector(weight=weight)
         control.ledger.open_capa("D-CONTROL", "WO-2401", "manual-check")
         equal(control.ledger.capa, 1, "manual CAPA count")
         equal(
@@ -193,10 +251,79 @@ def main():
 
     check("11", "finished-goods receipt is blocked and batch trace is exact", tc11)
 
-    if failed == 0 and passed == 10:
+    def tc12():
+        with run_folder(REPO_INBOX / "samples", config=config) as (
+            inbox_connector,
+            results,
+            results_dir,
+        ):
+            done_dir = results_dir.parent / "done"
+            equal(len(results), 9, "sample result count")
+            for _name, item in results:
+                equal(item["status"], "Posted", "sample status")
+            equal(inbox_connector.kg(), {"raw": 384.0, "wip": 116.0}, "inbox sample kg")
+            equal(
+                inbox_connector.pieces(),
+                {"hold": 96.0, "finished": 0.0, "rejection": 2.0, "rework": 1.0, "scrap": 1.0},
+                "inbox sample pieces",
+            )
+            equal(len(inbox_connector.ledger.entries), 7, "inbox sample entries")
+            equal(inbox_connector.ledger.capa, 0, "inbox sample CAPA")
+            equal(inbox_connector.ledger.capa_rows, [], "inbox sample CAPA rows")
+            trace = inbox_connector.lookup("B-1")
+            equal(trace["result"], "found", "B-1 trace result")
+            equal(trace["heat"], "H-441", "B-1 trace heat")
+            equal(trace["work_order"], "WO-2401", "B-1 trace work order")
+            equal(trace["document"], "STE-0006", "B-1 trace document")
+            equal(len(list(done_dir.glob("*.json"))), 9, "done file count")
+            equal(len(list(results_dir.glob("*.json"))), 9, "results file count")
+
+    check("12", "nine sample files reach raw 384, hold 96, finished 0 through read_all.", tc12)
+
+    def tc13():
+        expected_codes = {
+            "ex-st20.json": "E-ITEM",
+            "ex-h441.json": "E-BATCH",
+            "ex-nos.json": "E-UOM",
+            "ex-warehouse.json": "E-WH",
+            "ex-999.json": "E-STOCK",
+            "ex-finished.json": "E-QC",
+            "ex-nobatch.json": "E-BATCH",
+            "ex-scrap-return.json": "E-REASON",
+        }
+        with run_folder(REPO_INBOX / "examples", config=config) as (
+            example_connector,
+            results,
+            results_dir,
+        ):
+            equal(len(results), 8, "example result count")
+            for filename, expected_code in expected_codes.items():
+                data = json.loads((results_dir / filename).read_text(encoding="utf-8"))
+                equal(data["status"], "Business Rejected", f"{filename} status")
+                equal(data["code"], expected_code, f"{filename} code")
+            equal(example_connector.kg(), {"raw": 500.0, "wip": 0.0}, "example stock unchanged")
+            equal(
+                example_connector.pieces(),
+                {"hold": 0.0, "finished": 0.0, "rejection": 0.0, "rework": 0.0, "scrap": 0.0},
+                "example pieces unchanged",
+            )
+            equal(len(example_connector.ledger.entries), 0, "example entries unchanged")
+            equal(example_connector.ledger.capa, 0, "example CAPA unchanged")
+            equal(example_connector.ledger.capa_rows, [], "example CAPA rows unchanged")
+
+    check("13", "eight bad example files are refused without moving stock", tc13)
+
+    if failed == 0 and sorted(ran_checks) == sorted(CHECKS):
         print("ALL PASS")
     else:
-        print(f"NOT PASS: {passed} passed, {failed} failed")
+        missing = sorted(set(CHECKS) - set(ran_checks))
+        unexpected = sorted(set(ran_checks) - set(CHECKS))
+        seen = set()
+        duplicates = sorted({c for c in ran_checks if c in seen or seen.add(c)})
+        print(
+            f"NOT PASS: {passed} passed, {failed} failed, "
+            f"missing={missing}, unexpected={unexpected}, duplicates={duplicates}"
+        )
         raise SystemExit(1)
 
 

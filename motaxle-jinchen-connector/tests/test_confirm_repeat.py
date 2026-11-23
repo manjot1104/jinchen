@@ -111,10 +111,11 @@ class ConfirmRepeatTests(unittest.TestCase):
 
             res_tenth = read_all(connector, inbox_dir=inbox_dir, done_dir=done_dir, results_dir=results_dir)
             self.assertEqual(len(res_tenth), 1)
-            self.assertEqual(res_tenth[0]["status"], "Posted")
-            self.assertEqual(res_tenth[0]["code"], "E-DUP")
-            self.assertEqual(res_tenth[0]["document"], "")
-            self.assertEqual(res_tenth[0]["message"], "Already confirmed. Not stored again.")
+            _name, tenth_result = res_tenth[0]
+            self.assertEqual(tenth_result["status"], "Posted")
+            self.assertEqual(tenth_result["code"], "E-DUP")
+            self.assertEqual(tenth_result["document"], "")
+            self.assertEqual(tenth_result["message"], "Already confirmed. Not stored again.")
 
             # Stock and confirmations unchanged
             self.assertEqual(connector.kg()["raw"], 384.0)

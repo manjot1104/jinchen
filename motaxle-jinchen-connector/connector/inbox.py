@@ -1,8 +1,10 @@
 """File-based inbox helpers for the Jinchen POC."""
 
-import inspect
 import json
+import os
+import re
 import shutil
+import tempfile
 from pathlib import Path
 
 from connector.poc import DEFAULT_WEIGHT, ConfigError, require_test_mode
@@ -84,7 +86,102 @@ def list_inbox(inbox_dir=None):
     )
 
 
-def read_next(
+def _default_file_mode():
+    umask = os.umask(0o022)
+    os.umask(umask)
+    return 0o666 & ~umask
+
+
+def _write_result_atomic(results_directory, filename, result_data):
+    """Write result JSON to a temp file and atomically replace results/<filename>."""
+    result_file = results_directory / filename
+    tmp_name = None
+    try:
+        tmp_fd, tmp_name = tempfile.mkstemp(dir=results_directory, prefix=".tmp-", suffix=".tmp")
+        try:
+            handle = os.fdopen(tmp_fd, "w", encoding="utf-8")
+        except BaseException:
+            os.close(tmp_fd)
+            raise
+        with handle:
+            handle.write(json.dumps(result_data, indent=2) + "\n")
+        os.chmod(tmp_name, _default_file_mode())
+        os.replace(tmp_name, result_file)
+        tmp_name = None
+        return ""
+    except OSError as exc:
+        return str(exc)
+    finally:
+        if tmp_name is not None and os.path.exists(tmp_name):
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+
+
+def _next_dup_counter(stem, suffix, *directories):
+    pattern = re.compile(rf"^{re.escape(stem)}\.dup(\d+){re.escape(suffix)}$")
+    highest = 0
+    for directory in directories:
+        if not directory.is_dir():
+            continue
+        for entry in directory.iterdir():
+            match = pattern.match(entry.name)
+            if match:
+                highest = max(highest, int(match.group(1)))
+    return highest + 1
+
+
+def _allocate_unique_name(filename, done_directory, results_directory):
+    """Atomically reserve a unique filename checked against both done/ and results/."""
+    base_path = Path(filename)
+    stem = base_path.stem
+    suffix = base_path.suffix
+    counter = 0
+    while True:
+        candidate = filename if counter == 0 else f"{stem}.dup{counter}{suffix}"
+        if not (done_directory / candidate).exists():
+            try:
+                fd = os.open(results_directory / candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY, _default_file_mode())
+                os.close(fd)
+                return candidate
+            except FileExistsError:
+                pass
+        if counter == 0:
+            counter = _next_dup_counter(stem, suffix, done_directory, results_directory)
+        else:
+            counter += 1
+
+
+def _move_to_done(source, target):
+    """Move source to target using O_CREAT|O_EXCL reservation, os.replace, and shutil.move fallback."""
+    created_placeholder = False
+    try:
+        fd = os.open(target, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        created_placeholder = True
+        os.close(fd)
+        try:
+            os.replace(source, target)
+            return ""
+        except OSError:
+            if created_placeholder and target.exists():
+                try:
+                    target.unlink()
+                except OSError:
+                    pass
+                created_placeholder = False
+            shutil.move(str(source), str(target))
+            return ""
+    except OSError as exc:
+        if created_placeholder and target.exists():
+            try:
+                target.unlink()
+            except OSError:
+                pass
+        return str(exc)
+
+
+def _read_one(
     connector,
     inbox_dir=None,
     done_dir=None,
@@ -183,16 +280,44 @@ def read_next(
     done_directory.mkdir(parents=True, exist_ok=True)
     results_directory.mkdir(parents=True, exist_ok=True)
 
-    result_file = results_directory / source.name
-    result_file.write_text(
-        json.dumps(result_data, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    final_name = _allocate_unique_name(source.name, done_directory, results_directory)
+    write_err = _write_result_atomic(results_directory, final_name, result_data)
+    if write_err:
+        try:
+            (results_directory / final_name).unlink()
+        except OSError:
+            pass
+        result_data["message"] = f"{result_data['message']} (result write failed: {write_err})"
+        return final_name, result_data
 
     if move_to_done:
-        source.rename(done_directory / source.name)
+        move_err = _move_to_done(source, done_directory / final_name)
+        if move_err:
+            result_data["message"] = f"{result_data['message']} (move to done failed: {move_err})"
 
-    return result_data
+    return final_name, result_data
+
+
+def read_next(
+    connector,
+    inbox_dir=None,
+    done_dir=None,
+    results_dir=None,
+    switch_a=False,
+    source_file=None,
+):
+    """Read one file, save its result, then move it unless it is queued."""
+    outcome = _read_one(
+        connector,
+        inbox_dir=inbox_dir,
+        done_dir=done_dir,
+        results_dir=results_dir,
+        switch_a=switch_a,
+        source_file=source_file,
+    )
+    if outcome is None:
+        return None
+    return outcome[1]
 
 
 def read_all(
@@ -207,23 +332,36 @@ def read_all(
 
     The config is checked before the first file is touched. A filled live
     password or a bad mode raises ConfigError and nothing moves.
+    Returns a list of (final_name, result) pairs.
     """
     load_config(config_path)
     files = list_inbox(inbox_dir)
     results = []
 
     for source in files:
-        result = read_next(
-            connector,
-            inbox_dir=inbox_dir,
-            done_dir=done_dir,
-            results_dir=results_dir,
-            switch_a=switch_a,
-            source_file=source,
-        )
+        try:
+            outcome = _read_one(
+                connector,
+                inbox_dir=inbox_dir,
+                done_dir=done_dir,
+                results_dir=results_dir,
+                switch_a=switch_a,
+                source_file=source,
+            )
+        except OSError as exc:
+            outcome = (
+                source.name,
+                {
+                    "status": "Business Rejected",
+                    "code": "E-ITEM",
+                    "document": "",
+                    "message": f"File could not be read: {exc}",
+                    "logged": False,
+                },
+            )
 
-        if result is not None:
-            results.append(result)
+        if outcome is not None:
+            results.append(outcome)
 
     return results
 
