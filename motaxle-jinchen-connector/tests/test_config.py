@@ -123,7 +123,9 @@ class ConfigTests(unittest.TestCase):
         import server
         with tempfile.TemporaryDirectory() as temp:
             path = write_config(temp, "test", "")
+            temp_log = str(Path(temp) / "inbox" / "log.jsonl")
             with mock.patch.object(inbox, "CONFIG_PATH", path), \
+                 mock.patch.object(server, "LOG_PATH", temp_log), \
                  mock.patch.object(server, "ThreadingHTTPServer") as built, \
                  mock.patch("builtins.print"):
                 server.main()
