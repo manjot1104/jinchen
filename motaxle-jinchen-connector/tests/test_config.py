@@ -123,7 +123,9 @@ class ConfigTests(unittest.TestCase):
         import server
         with tempfile.TemporaryDirectory() as temp:
             path = write_config(temp, "test", "")
+            temp_log = str(Path(temp) / "inbox" / "log.jsonl")
             with mock.patch.object(inbox, "CONFIG_PATH", path), \
+                 mock.patch.object(server, "LOG_PATH", temp_log), \
                  mock.patch.object(server, "ThreadingHTTPServer") as built, \
                  mock.patch("builtins.print"):
                 server.main()
@@ -156,11 +158,6 @@ class ConfigTests(unittest.TestCase):
         lines = [call.args[0] for call in printed.call_args_list if call.args]
         self.assertEqual(lines, [MODE_SENTENCE, "prove.py did not run"])
         self.assertFalse(any(str(line).startswith("TC-02") for line in lines))
-
-    def test_validate_config_uses_source_neutral_message_for_non_dict(self):
-        with self.assertRaises(ConfigError) as caught:
-            inbox._validate_config(["not", "a", "dict"])
-        self.assertEqual(str(caught.exception), "Config is not a valid JSON object.")
 
     def test_invalid_json_file_keeps_file_specific_error_message(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -316,7 +313,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, 1)
         lines = [str(call.args[0]) for call in printed.call_args_list if call.args]
         self.assertNotIn("ALL PASS", lines)
-        self.assertTrue(any(line.startswith("NOT PASS:") for line in lines))
+        self.assertTrue(any(line.startswith("NOT PASS:") and "duplicates=['12']" in line for line in lines))
 
     def test_non_dict_config_file_raises_config_json_message(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -381,9 +378,46 @@ class ConfigTests(unittest.TestCase):
                  ) as mocked_read_all:
                 desk = server.Desk()
                 payload = desk.read_inbox()
-        mocked_read_all.assert_called_once_with(desk.connector, switch_a=desk.switch_a, include_names=True)
+        mocked_read_all.assert_called_once_with(desk.connector, switch_a=desk.switch_a)
         self.assertEqual(payload["inbox_message"], "Read 2 inbox file(s).")
         self.assertEqual([row["id"] for row in desk.attempts], ["first.json", "second.json"])
+
+    def test_desk_reset_with_reload_config_flag_reloads_and_reports_bad_config(self):
+        import server
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "config.json"
+            path.write_text(json.dumps({
+                "mode": "test",
+                "live_password": "",
+                "weight": {"kg_per_piece": 1.2, "loss_allowance": 0.05},
+            }))
+            with mock.patch.object(inbox, "CONFIG_PATH", path):
+                desk = server.Desk(weight={"kg_per_piece": 1.2, "loss_allowance": 0.05}, reload_config=True)
+                path.write_text(json.dumps({
+                    "mode": "test",
+                    "live_password": "",
+                    "weight": {"kg_per_piece": 1.6, "loss_allowance": 0.1},
+                }))
+                desk.reset()
+                self.assertEqual(desk.weight, {"kg_per_piece": 1.6, "loss_allowance": 0.1})
+                path.write_text(json.dumps({
+                    "mode": "test",
+                    "live_password": "",
+                    "weight": {"kg_per_piece": 0, "loss_allowance": 0.1},
+                }))
+                desk.reset()
+                self.assertEqual(desk.weight, {"kg_per_piece": 1.6, "loss_allowance": 0.1})
+                self.assertIn("Job reset. config.json was not loaded:", desk.attempts[-1]["message"])
+
+    def test_desk_read_inbox_catches_oserror(self):
+        import server
+        with tempfile.TemporaryDirectory() as temp:
+            path = write_config(temp, "test", "")
+            with mock.patch.object(inbox, "CONFIG_PATH", path), \
+                 mock.patch.object(server, "read_all", side_effect=OSError("disk error")):
+                desk = server.Desk()
+                payload = desk.read_inbox()
+        self.assertEqual(payload["inbox_message"], "disk error")
 
 
 if __name__ == "__main__":

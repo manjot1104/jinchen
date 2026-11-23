@@ -31,7 +31,7 @@ Prints the whole job in the terminal: the live-password refusal at startup, J-10
 
     python3 server.py
 
-Open http://127.0.0.1:8765. The port is required. The desk has Today, Work order, Material, Operations, Quality, Trace, Message log, and Inbox. Reset job returns the ledger to 500 kg and turns both switches off. Stop the server with Ctrl+C.
+Open http://127.0.0.1:8765. The port is required. The desk has Today, Work order, Material, Operations, Quality, Trace, Message log, and Inbox. Reset job returns the ledger to 500 kg and turns both switches off, moving processed files in `inbox/done/` and `inbox/results/` to `inbox/archive/<time>/done/` and `inbox/archive/<time>/results/` when the message log is cleared. Stop the server with Ctrl+C.
 
 ## 5. Copy samples, then Read inbox
 
@@ -58,6 +58,12 @@ The Work order screen has **Hold**, **Resume** and **Cancel**. A held or cancell
 - [docs/message-contract.md](docs/message-contract.md): every field of every message, and the code returned when it is wrong. POC contract, not a signed Jinchen API.
 - [docs/run-book.md](docs/run-book.md): restart, switches, replay, and who owns the test passwords.
 - [docs/decisions.md](docs/decisions.md): the lead's decisions, with dates and the stories they unblock.
+- [docs/deployment.md](docs/deployment.md): where the connector runs, outside ERPNext and the Motaxle app, and how to start, stop and restart it.
+- [docs/interface-note.md](docs/interface-note.md): POC draft of the interface note: the ten messages marked, the system of record, and the fifteen workshop answers. Not signed yet.
+- [docs/reason-list.md](docs/reason-list.md): the scrap, rejection and rework reasons, one decision each.
+- [docs/master-data.md](docs/master-data.md): every master the POC needs, with owner, doctype, key field and load order.
+- [docs/poc-acceptance.md](docs/poc-acceptance.md): how the POC is demonstrated, and the acceptance checklist.
+- [docs/message-log.md](docs/message-log.md): the twelve fields of every log row, the seven statuses, and how secrets are masked.
 
 ## How we work
 

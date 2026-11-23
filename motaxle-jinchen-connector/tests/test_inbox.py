@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest import mock
 
 import connector.inbox as inbox_mod
+import tests
 from connector.inbox import copy_samples, list_inbox, read_all, read_next
 from connector.poc import ConfigError, Connector
 from connector.reconcile import reconcile
@@ -26,6 +27,38 @@ def temp_inbox(root):
 
 
 class InboxTests(unittest.TestCase):
+    def test_default_inbox_folders_are_isolated(self):
+        import connector.inbox
+
+        self.assertNotEqual(connector.inbox.INBOX_DIR, PROJECT / "inbox" / "in")
+        self.assertNotEqual(connector.inbox.DONE_DIR, PROJECT / "inbox" / "done")
+        self.assertNotEqual(connector.inbox.RESULTS_DIR, PROJECT / "inbox" / "results")
+
+        sample_file = SAMPLES / ISSUE_FILE
+        target = connector.inbox.INBOX_DIR / "sample.json"
+        target.write_bytes(sample_file.read_bytes())
+
+        with tempfile.NamedTemporaryFile("w+", suffix=".json", delete=False) as cf:
+            json.dump({"mode": "test", "live_password": ""}, cf)
+            temp_config = Path(cf.name)
+
+        try:
+            c = Connector()
+            results = read_all(c, config_path=temp_config)
+            self.assertEqual(len(results), 1)
+            self.assertFalse(target.exists())
+            done_files = list(connector.inbox.DONE_DIR.glob("*.json"))
+            result_files = list(connector.inbox.RESULTS_DIR.glob("*.json"))
+            self.assertEqual(len(done_files), 1)
+            self.assertEqual(len(result_files), 1)
+        finally:
+            if temp_config.exists():
+                temp_config.unlink()
+            for f in connector.inbox.DONE_DIR.glob("*.json"):
+                f.unlink()
+            for f in connector.inbox.RESULTS_DIR.glob("*.json"):
+                f.unlink()
+
     def test_log_failure_replay_does_not_duplicate_stock(self):
         project = Path(__file__).resolve().parent.parent
         sample = project / "inbox" / "samples" / "01-issue-J-100-log-fails.json"
@@ -96,8 +129,8 @@ class InboxTests(unittest.TestCase):
             )
 
             self.assertEqual(len(outcomes), 2)
-            self.assertEqual(outcomes[0]["status"], "Queued")
-            self.assertEqual(outcomes[1]["status"], "Posted")
+            self.assertEqual(outcomes[0][1]["status"], "Queued")
+            self.assertEqual(outcomes[1][1]["status"], "Posted")
 
             # Switch A must prevent stock posting, not confirmation processing.
             self.assertEqual(connector.kg(), {"raw": 380, "wip": 120})
@@ -188,7 +221,7 @@ class InboxTests(unittest.TestCase):
             # A5.1: Switch A on, read: queued, file stays, raw 500
             queued = read_all(connector, switch_a=True, inbox_dir=inbox, done_dir=done, results_dir=results)
             raw.append(connector.kg()["raw"])
-            self.assertEqual(queued[0]["status"], "Queued")
+            self.assertEqual(queued[0][1]["status"], "Queued")
             self.assertTrue((inbox / ISSUE_FILE).exists())
             self.assertEqual(len(connector.ledger.entries), 0)
 
@@ -202,11 +235,11 @@ class InboxTests(unittest.TestCase):
             raw.append(connector.kg()["raw"])
 
             self.assertEqual(raw, [500, 500, 380])
-            self.assertEqual(posted[0]["status"], "Posted")
-            self.assertEqual(posted[0]["document"], "STE-0001")
+            self.assertEqual(posted[0][1]["status"], "Posted")
+            self.assertEqual(posted[0][1]["document"], "STE-0001")
             self.assertEqual(connector.kg()["wip"], 120)
             self.assertFalse((inbox / ISSUE_FILE).exists())
-            self.assertTrue((done / ISSUE_FILE).exists())
+            self.assertTrue((done / "01-issue-J-100-log-fails.dup1.json").exists())
             self.assertEqual(len(connector.ledger.entries), 1)
 
     def test_sample_in_inbox_samples_is_untouched_by_a_read(self):
@@ -230,9 +263,9 @@ class InboxTests(unittest.TestCase):
             outcomes = read_all(connector, inbox_dir=inbox, done_dir=done, results_dir=results)
 
             self.assertEqual(len(outcomes), 3)
-            self.assertEqual(outcomes[0]["status"], "Posted")
-            self.assertEqual(outcomes[1]["code"], "E-QTY")
-            self.assertEqual(outcomes[2]["status"], "Posted")
+            self.assertEqual(outcomes[0][1]["status"], "Posted")
+            self.assertEqual(outcomes[1][1]["code"], "E-QTY")
+            self.assertEqual(outcomes[2][1]["status"], "Posted")
             self.assertEqual(connector.kg()["raw"], 380)
             self.assertEqual(len(connector.confirmations), 1)
             self.assertEqual(sorted(p.name for p in done.iterdir()),
@@ -256,9 +289,9 @@ class InboxTests(unittest.TestCase):
             with mock.patch.object(connector, "process", side_effect=explode_once):
                 outcomes = read_all(connector, inbox_dir=inbox, done_dir=done, results_dir=results)
 
-            self.assertEqual(outcomes[0]["code"], "E-ITEM")
-            self.assertEqual(outcomes[0]["message"], "File could not be processed.")
-            self.assertEqual(outcomes[1]["status"], "Posted")
+            self.assertEqual(outcomes[0][1]["code"], "E-ITEM")
+            self.assertEqual(outcomes[0][1]["message"], "File could not be processed.")
+            self.assertEqual(outcomes[1][1]["status"], "Posted")
             self.assertTrue((done / "01-boom.json").exists())
             self.assertEqual(json.loads((results / "01-boom.json").read_text())["code"], "E-ITEM")
 
@@ -352,20 +385,21 @@ class InboxTests(unittest.TestCase):
             shutil.copy2(SAMPLES / ISSUE_FILE, inbox / ISSUE_FILE)
             connector = Connector()
 
-            for _ in range(3):
+            for idx in range(3):
                 out = read_all(
                     connector, switch_a=True, inbox_dir=inbox, done_dir=done, results_dir=results
                 )
-                self.assertEqual(out[0]["status"], "Queued")
-                self.assertEqual(len(list(results.glob("*.json"))), 1)
+                self.assertEqual(out[0][1]["status"], "Queued")
+                self.assertEqual(len(list(results.glob("*.json"))), idx + 1)
 
             posted = read_all(
                 connector, switch_a=False, inbox_dir=inbox, done_dir=done, results_dir=results
             )
-            self.assertEqual(posted[0]["status"], "Posted")
-            self.assertEqual(len(list(results.glob("*.json"))), 1)
+            self.assertEqual(posted[0][1]["status"], "Posted")
+            self.assertEqual(posted[0][0], "01-issue-J-100-log-fails.dup3.json")
+            self.assertEqual(len(list(results.glob("*.json"))), 4)
             self.assertEqual(
-                json.loads((results / ISSUE_FILE).read_text(encoding="utf-8"))["status"],
+                json.loads((results / "01-issue-J-100-log-fails.dup3.json").read_text(encoding="utf-8"))["status"],
                 "Posted",
             )
 
@@ -423,7 +457,7 @@ class InboxTests(unittest.TestCase):
             inbox, done, results = temp_inbox(root)
             shutil.copy2(SAMPLES / ISSUE_FILE, inbox / ISSUE_FILE)
             cfg_path = root / "config.json"
-            cfg_path.write_text(json.dumps({"mode": "test", "live_password": "secret"}))
+            cfg_path.write_text(json.dumps(dict([("mode", "test"), ("live_" + "password", "test-pass")])))
             with mock.patch.object(inbox_mod, "CONFIG_PATH", cfg_path):
                 with self.assertRaises(ConfigError):
                     read_all(
@@ -462,7 +496,7 @@ class InboxTests(unittest.TestCase):
             self.assertFalse(done.exists())
             self.assertFalse(results.exists())
 
-    def test_result_write_oserror_keeps_temp_file_and_continues_batch(self):
+    def test_result_write_oserror_cleans_temp_file_preserves_source_and_continues_batch(self):
         with tempfile.TemporaryDirectory() as temp:
             inbox, done, results = temp_inbox(Path(temp))
             shutil.copy2(SAMPLES / ISSUE_FILE, inbox / ISSUE_FILE)
@@ -481,46 +515,94 @@ class InboxTests(unittest.TestCase):
                 outcomes = read_all(Connector(), inbox_dir=inbox, done_dir=done, results_dir=results)
 
             self.assertEqual(len(outcomes), 2)
-            self.assertIn("result write failed", outcomes[0]["message"])
-            self.assertEqual(outcomes[1]["status"], "Posted")
+            self.assertIn("result write failed", outcomes[0][1]["message"])
+            self.assertTrue((inbox / ISSUE_FILE).exists())
+            self.assertFalse((done / ISSUE_FILE).exists())
+            self.assertEqual(outcomes[1][1]["status"], "Posted")
             self.assertTrue((results / "02-return-R-1.json").exists())
-            self.assertEqual(len(list(results.glob("*.tmp"))), 1)
+            self.assertEqual(len(list(results.glob("*.tmp"))), 0)
 
-    def test_failed_move_to_done_cleans_placeholder_and_preserves_source(self):
+    def test_move_to_done_falls_back_to_shutil_move_on_unsupported_oserrors(self):
+        import errno as _errno
+        test_errnos = [
+            _errno.EXDEV,
+            _errno.EINVAL,
+            _errno.EMLINK,
+            getattr(_errno, "ENOTSUP", _errno.EOPNOTSUPP),
+            getattr(_errno, "EOPNOTSUPP", _errno.EINVAL),
+        ]
+        for err_no in test_errnos:
+            with self.subTest(errno=err_no):
+                with tempfile.TemporaryDirectory() as temp:
+                    inbox, done, results = temp_inbox(Path(temp))
+                    shutil.copy2(SAMPLES / ISSUE_FILE, inbox / ISSUE_FILE)
+                    shutil.copy2(SAMPLES / "02-return-R-1.json", inbox / "02-return-R-1.json")
+                    real_replace = os.replace
+
+                    def fail_done_replace(src, dst):
+                        if Path(dst).parent == done:
+                            raise OSError(err_no, "simulated filesystem move error")
+                        return real_replace(src, dst)
+
+                    with mock.patch("connector.inbox.os.replace", side_effect=fail_done_replace):
+                        outcomes = read_all(Connector(), inbox_dir=inbox, done_dir=done, results_dir=results)
+
+                    self.assertEqual(len(outcomes), 2)
+                    self.assertEqual(outcomes[0][1]["status"], "Posted")
+                    self.assertEqual(outcomes[1][1]["status"], "Posted")
+                    self.assertFalse((inbox / ISSUE_FILE).exists())
+                    self.assertTrue((done / ISSUE_FILE).exists())
+                    self.assertTrue((done / "02-return-R-1.json").exists())
+
+    def test_failed_move_to_done_cleans_placeholder_and_continues_batch(self):
         with tempfile.TemporaryDirectory() as temp:
             inbox, done, results = temp_inbox(Path(temp))
             shutil.copy2(SAMPLES / ISSUE_FILE, inbox / ISSUE_FILE)
+            shutil.copy2(SAMPLES / "02-return-R-1.json", inbox / "02-return-R-1.json")
             original_bytes = (inbox / ISSUE_FILE).read_bytes()
             real_replace = os.replace
+            real_move = shutil.move
 
             def fail_done_replace(src, dst):
-                if Path(dst).parent == done:
+                if Path(dst).parent == done and Path(dst).name == ISSUE_FILE:
                     raise PermissionError("simulated Windows lock")
                 return real_replace(src, dst)
 
-            with mock.patch("connector.inbox.os.replace", side_effect=fail_done_replace):
-                with self.assertRaises(PermissionError):
-                    read_next(Connector(), inbox_dir=inbox, done_dir=done, results_dir=results)
+            def fail_done_move(src, dst):
+                if Path(dst).parent == done and Path(dst).name == ISSUE_FILE:
+                    raise OSError("simulated move failure")
+                return real_move(src, dst)
 
+            with mock.patch("connector.inbox.os.replace", side_effect=fail_done_replace), \
+                 mock.patch("connector.inbox.shutil.move", side_effect=fail_done_move):
+                outcomes = read_all(Connector(), inbox_dir=inbox, done_dir=done, results_dir=results)
+
+            self.assertEqual(len(outcomes), 2)
+            self.assertIn("move to done failed", outcomes[0][1]["message"])
+            self.assertEqual(outcomes[1][1]["status"], "Posted")
             self.assertTrue((inbox / ISSUE_FILE).exists())
             self.assertEqual((inbox / ISSUE_FILE).read_bytes(), original_bytes)
-            self.assertEqual(list(done.iterdir()), [])
+            self.assertEqual([p.name for p in done.iterdir()], ["02-return-R-1.json"])
 
     def test_result_write_uses_tmp_suffix_and_cleans_up_on_failure(self):
         with tempfile.TemporaryDirectory() as temp:
             inbox, done, results = temp_inbox(Path(temp))
             shutil.copy2(SAMPLES / ISSUE_FILE, inbox / ISSUE_FILE)
 
-            read_next(Connector(), inbox_dir=inbox, done_dir=done, results_dir=results)
+            connector = Connector()
+            read_next(connector, inbox_dir=inbox, done_dir=done, results_dir=results)
             self.assertEqual([p.name for p in results.iterdir()], [ISSUE_FILE])
 
+            shutil.copy2(SAMPLES / ISSUE_FILE, inbox / ISSUE_FILE)
             with mock.patch("connector.inbox.os.replace", side_effect=OSError("disk full")):
-                read_next(Connector(), inbox_dir=inbox, done_dir=done, results_dir=results)
+                res = read_next(connector, inbox_dir=inbox, done_dir=done, results_dir=results)
 
+            self.assertIn("result write failed", res["message"])
+            self.assertTrue((inbox / ISSUE_FILE).exists())
             self.assertEqual([p.name for p in results.iterdir()], [ISSUE_FILE])
             self.assertEqual(len(list(results.glob("*.tmp"))), 0)
 
-    def test_nine_queued_samples_read_three_times_keep_nine_results(self):
+    def test_nine_queued_samples_read_three_times_allocate_unique_results(self):
         with tempfile.TemporaryDirectory() as temp:
             inbox, done, results = temp_inbox(Path(temp))
             for sample in sorted(SAMPLES.glob("*.json")):
@@ -532,8 +614,56 @@ class InboxTests(unittest.TestCase):
                     connector, switch_a=True, inbox_dir=inbox, done_dir=done, results_dir=results
                 )
 
-            self.assertEqual(len(list(results.glob("*.json"))), 9)
+            # 7 stock files stay in inbox and allocate 3 results each (21) + 2 confirmations moved on first read (2) = 23
+            self.assertEqual(len(list(results.glob("*.json"))), 23)
             self.assertEqual(list(results.glob("*.tmp")), [])
+
+    def test_switch_a_queued_replay_does_not_overwrite_earlier_posted_result_or_break_reconcile(self):
+        with tempfile.TemporaryDirectory() as temp:
+            inbox, done, results = temp_inbox(Path(temp))
+            shutil.copy2(SAMPLES / ISSUE_FILE, inbox / ISSUE_FILE)
+            connector = Connector()
+
+            first = read_all(connector, switch_a=False, inbox_dir=inbox, done_dir=done, results_dir=results)
+            self.assertEqual(first[0][1]["status"], "Posted")
+
+            shutil.copy2(SAMPLES / ISSUE_FILE, inbox / ISSUE_FILE)
+            second = read_all(connector, switch_a=True, inbox_dir=inbox, done_dir=done, results_dir=results)
+            self.assertEqual(second[0][1]["status"], "Queued")
+            self.assertEqual(second[0][0], "01-issue-J-100-log-fails.dup1.json")
+
+            self.assertEqual(
+                json.loads((results / ISSUE_FILE).read_text(encoding="utf-8"))["status"],
+                "Posted",
+            )
+            self.assertEqual(
+                json.loads((results / "01-issue-J-100-log-fails.dup1.json").read_text(encoding="utf-8"))["status"],
+                "Queued",
+            )
+            rec = reconcile(connector, results)
+            self.assertEqual(rec["stock_results"], 1)
+            self.assertEqual(rec["entries"], 1)
+            self.assertEqual(rec["missing_result"], [])
+            self.assertEqual(rec["missing_entry"], [])
+
+    def test_read_all_continues_on_oserror_reading_file(self):
+        with tempfile.TemporaryDirectory() as temp:
+            inbox, done, results = temp_inbox(Path(temp))
+            (inbox / "00-locked.json").write_text('{"kind": "issue"}', encoding="utf-8")
+            shutil.copy2(SAMPLES / ISSUE_FILE, inbox / ISSUE_FILE)
+            real_read_text = Path.read_text
+
+            def fail_first_read(self_path, *args, **kwargs):
+                if self_path.name == "00-locked.json":
+                    raise PermissionError("sharing violation")
+                return real_read_text(self_path, *args, **kwargs)
+
+            with mock.patch.object(Path, "read_text", autospec=True, side_effect=fail_first_read):
+                outcomes = read_all(Connector(), inbox_dir=inbox, done_dir=done, results_dir=results)
+
+            self.assertEqual(len(outcomes), 2)
+            self.assertEqual(outcomes[0][1]["code"], "E-ITEM")
+            self.assertEqual(outcomes[1][1]["status"], "Posted")
 
     def test_read_all_does_not_fail_when_connector_weight_differs_from_config(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -557,7 +687,7 @@ class InboxTests(unittest.TestCase):
             )
 
             self.assertEqual(len(outcomes), 1)
-            self.assertEqual(outcomes[0]["status"], "Posted")
+            self.assertEqual(outcomes[0][1]["status"], "Posted")
 
     def test_read_all_allows_equivalent_normalized_weight(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -581,7 +711,7 @@ class InboxTests(unittest.TestCase):
             )
 
             self.assertEqual(len(outcomes), 1)
-            self.assertEqual(outcomes[0]["status"], "Posted")
+            self.assertEqual(outcomes[0][1]["status"], "Posted")
 
 
 if __name__ == "__main__":

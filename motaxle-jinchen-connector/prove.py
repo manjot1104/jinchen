@@ -250,7 +250,7 @@ def main():
         ):
             done_dir = results_dir.parent / "done"
             equal(len(results), 9, "sample result count")
-            for item in results:
+            for _name, item in results:
                 equal(item["status"], "Posted", "sample status")
             equal(inbox_connector.kg(), {"raw": 384.0, "wip": 116.0}, "inbox sample kg")
             equal(
@@ -309,7 +309,12 @@ def main():
     else:
         missing = sorted(set(CHECKS) - set(ran_checks))
         unexpected = sorted(set(ran_checks) - set(CHECKS))
-        print(f"NOT PASS: {passed} passed, {failed} failed, missing={missing}, unexpected={unexpected}")
+        seen = set()
+        duplicates = sorted({c for c in ran_checks if c in seen or seen.add(c)})
+        print(
+            f"NOT PASS: {passed} passed, {failed} failed, "
+            f"missing={missing}, unexpected={unexpected}, duplicates={duplicates}"
+        )
         raise SystemExit(1)
 
 

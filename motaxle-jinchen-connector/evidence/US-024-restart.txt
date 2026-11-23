@@ -1,0 +1,18 @@
+US-024: one start, stop and restart of the connector desk.
+Run on 20 November 2026 12:34 UTC on branch manjot-deploy-unit (from main at fa03655), Python 3.9.6.
+Port 8799 instead of 8765, because another desk already held 8765 on this machine.
+No ERPNext site, bench or Motaxle app was started, stopped or redeployed.
+
+1. Start, then stop
+$ python3 server.py
+  Open http://127.0.0.1:8799
+  Ctrl+C stops it.
+  The desk stopped.
+  (GET / answered 200. Ctrl+C sent. Exit code 0. Port 8799 free.)
+
+2. Restart: start again, then stop
+$ python3 server.py
+  Open http://127.0.0.1:8799
+  Ctrl+C stops it.
+  The desk stopped.
+  (GET / answered 200. Ctrl+C sent. Exit code 0. Port 8799 free.)

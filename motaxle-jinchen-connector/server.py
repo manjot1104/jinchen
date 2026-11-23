@@ -7,14 +7,18 @@ Nothing is sent to Jinchen or to a live ERPNext site.
 
 import json
 import os
+import shutil
 import sys
 import threading
+from datetime import datetime
+from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import unquote
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from connector.poc import ConfigError, Connector
+from connector.poc import ConfigError, Connector, LOG_FILE_ERROR_MESSAGE
+import connector.inbox as inbox_folders
 from connector.inbox import copy_samples, list_inbox, load_config, read_all
 
 HOST = "127.0.0.1"
@@ -27,29 +31,123 @@ def whole(value):
     return value
 
 
+LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "inbox", "log.jsonl")
+
+
 class Desk:
-    def __init__(self, weight=None):
+    def __init__(self, weight=None, log_path=None, reload_config=None):
         self._fixed_weight = weight
+        self._reload_config = (weight is None) if reload_config is None else bool(reload_config)
         self.weight = weight
-        self.connector = Connector(weight=self.weight)
-        self.attempts = []
+        self.log_path = log_path
+        self.connector = Connector(weight=self.weight, log_path=self.log_path)
+        self.attempts = [
+            {
+                "id": row.attempt_id or row.ref,
+                "status": row.status,
+                "code": row.code,
+                "document": row.document,
+                "message": "Read back from the log file.",
+            }
+            for row in self.connector.log
+        ]
         self.switch_a = False
         self.switch_b = False
-        self.released = False
+        self.released = any(
+            getattr(row, "kind", "") == "release" and getattr(row, "status", "") == "Sent"
+            for row in self.connector.log
+        )
+
+    def _take_log_error(self, text):
+        if getattr(self.connector, "log_file_error", False):
+            self.connector.log_file_error = False
+            return (text + " " + LOG_FILE_ERROR_MESSAGE).strip() if text else LOG_FILE_ERROR_MESSAGE
+        return text
 
     def reset(self):
-        if self._fixed_weight is None:
+        config_error = None
+        if self._reload_config:
             try:
                 self.weight = load_config()["weight"]
-            except ConfigError:
-                pass
+            except (ConfigError, OSError) as exc:
+                config_error = str(exc)
         else:
             self.weight = self._fixed_weight
-        self.connector = Connector(weight=self.weight)
+
+        cleared = True
+        if self.log_path and os.path.exists(self.log_path):
+            try:
+                os.remove(self.log_path)
+            except OSError:
+                try:
+                    with open(self.log_path, "w", encoding="utf-8") as f:
+                        pass
+                except OSError:
+                    cleared = False
+        if self.connector.ledger_path and os.path.exists(self.connector.ledger_path):
+            try:
+                os.remove(self.connector.ledger_path)
+            except OSError:
+                try:
+                    with open(self.connector.ledger_path, "w", encoding="utf-8") as f:
+                        pass
+                except OSError:
+                    pass
+
+        # Move done and result files to a timestamped archive, only when this
+        # desk keeps a log file and the log was cleared. A desk without a log
+        # file (tests, demo) never touches the inbox folders. The folders are
+        # read at call time, so a patched connector.inbox is respected.
+        if cleared and self.log_path:
+            time_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+            archive_dir = inbox_folders.DONE_DIR.parent / "archive" / time_str
+            for name, folder in (("done", inbox_folders.DONE_DIR), ("results", inbox_folders.RESULTS_DIR)):
+                files = [f for f in folder.iterdir() if f.is_file() and f.suffix.lower() == ".json"] if folder.is_dir() else []
+                if not files:
+                    continue
+                # done/ and results/ hold files with the same names, so each keeps its own folder.
+                (archive_dir / name).mkdir(parents=True, exist_ok=True)
+                for f in files:
+                    try:
+                        shutil.move(str(f), str(archive_dir / name / f.name))
+                    except OSError:
+                        pass
+
+            if self.connector.counter_path and self.connector.counter_path.exists():
+                try:
+                    self.connector.counter_path.unlink()
+                except OSError:
+                    pass
+
+        path_to_use = self.log_path if cleared else None
+        self.connector = Connector(weight=self.weight, log_path=path_to_use)
+        # Item 12: Dropped self.connector.ledger._n = 0
+        if cleared and self.connector.counter_path and self.connector.counter_path.exists():
+            try:
+                self.connector.counter_path.unlink()
+            except OSError:
+                pass
         self.attempts = []
         self.switch_a = False
         self.switch_b = False
         self.released = False
+        if config_error is not None:
+            msg = f"Job reset. config.json was not loaded: {config_error}"
+            if not cleared:
+                msg += " The message log could not be cleared. A restart will bring the old state back."
+        else:
+            msg = (
+                "Job reset. The message log was cleared."
+                if cleared
+                else "Job reset. The message log could not be cleared. A restart will bring the old state back."
+            )
+        self.attempts.append({
+            "id": "reset",
+            "status": "Posted",
+            "code": "",
+            "document": "",
+            "message": msg,
+        })
 
     def run(self, action_id):
         spec = ACTIONS.get(action_id)
@@ -60,16 +158,19 @@ class Desk:
     def read_inbox(self):
         """Read inbox files through the desk's current Switch A setting."""
         try:
-            pairs = read_all(self.connector, switch_a=self.switch_a, include_names=True)
-        except ConfigError as exc:
+            pairs = read_all(self.connector, switch_a=self.switch_a)
+        except (ConfigError, OSError) as exc:
             payload = self.payload(None)
             payload["inbox_message"] = str(exc)
             return payload
 
         last_result = None
-        for source_name, result in pairs:
+        for final_name, result in pairs:
+            # Item 15: Only add to attempts if written to log
+            if not result.get("logged", True):
+                continue
             row = {
-                "id": source_name,
+                "id": final_name,
                 "status": result["status"],
                 "code": result["code"],
                 "document": result["document"],
@@ -79,22 +180,34 @@ class Desk:
             last_result = row
 
         payload = self.payload(last_result)
-        payload["inbox_message"] = (
+        inbox_msg = (
             f"Read {len(pairs)} inbox file(s)."
             if pairs
             else "Inbox is empty."
         )
+        payload["inbox_message"] = self._take_log_error(inbox_msg)
         return payload
 
     def apply(self, label, message, drop_log=False):
         kind = (message or {}).get("kind") or ""
+        attempt_id = label or (message or {}).get("id") or kind
         if self.switch_a and kind in ("issue", "return", "disposition", "receipt"):
+            logged = self.connector.record_queued(attempt_id, message)
+            if not logged:
+                return {
+                    "id": attempt_id,
+                    "status": "Queued",
+                    "code": "",
+                    "document": "",
+                    "message": "Switch A is on. Already queued.",
+                }
+            msg = self._take_log_error("Switch A is on. Logged only. Stock was not posted. Turning Switch A off does not post the queue.")
             row = {
-                "id": label or message.get("id") or kind,
+                "id": attempt_id,
                 "status": "Queued",
                 "code": "",
                 "document": "",
-                "message": "Switch A is on. Logged only. Stock was not posted. Turning Switch A off does not post the queue.",
+                "message": msg,
             }
             self.attempts.append(row)
             return row
@@ -116,12 +229,13 @@ class Desk:
                 message["completed"] = float(message["completed"])
             except (TypeError, ValueError):
                 message["completed"] = 0
-        result = self.connector.process(message, drop_log=drop_log)
+        result = self.connector.process(message, drop_log=drop_log, attempt_id=attempt_id)
         text = result.message
         if drop_log and not result.code:
             text = text + " The stock entry was saved, then the log write failed."
+        text = self._take_log_error(text)
         row = {
-            "id": label or message.get("id") or kind,
+            "id": attempt_id,
             "status": result.status,
             "code": result.code,
             "document": result.document,
@@ -166,6 +280,21 @@ class Desk:
                 "document": "",
                 "message": "WO-2401 release was recorded on this desk. Jinchen was not called.",
             }
+        # The log keeps one of the seven statuses (US-025). Switch B refuses
+        # the release, so its "Stopped" is logged as Business Rejected.
+        log_status = "Business Rejected" if row["status"] == "Stopped" else row["status"]
+        self.connector.record_attempt(
+            "WO-2401",
+            "WO-2401",
+            "release",
+            log_status,
+            row["code"],
+            row["document"],
+            drop_log=False,
+            quantities=None,
+            attempt_id="release",
+        )
+        row["message"] = self._take_log_error(row["message"])
         self.attempts.append(row)
         return row
 
@@ -723,6 +852,7 @@ function paint() {
 
 function show(name) {
   view = name;
+  window.location.hash = "#" + name;
   const kindFor = {material: "issue", operations: "confirm", quality: "receipt"};
   if (kindFor[name]) {
     document.getElementById("m-kind").value = kindFor[name];
@@ -752,7 +882,12 @@ function syncComposer() {
 
 async function load() {
   state = await (await fetch("/api/state")).json();
-  paint();
+  const h = (window.location.hash || "").replace("#", "");
+  if (screens.indexOf(h) >= 0) {
+    show(h);
+  } else {
+    paint();
+  }
 }
 
 async function send(id) {
@@ -1013,18 +1148,25 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
+    global DESK
     try:
         config = load_config()
     except ConfigError as exc:
         print(str(exc), flush=True)
         print("The desk did not start.", flush=True)
         return 1
-    DESK.weight = config["weight"]
-    DESK.reset()
+    DESK = Desk(weight=config["weight"], log_path=LOG_PATH, reload_config=True)
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     print("Open http://%s:%d" % (HOST, PORT), flush=True)
     print("Ctrl+C stops it.", flush=True)
-    server.serve_forever()
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+    print("The desk stopped.", flush=True)
+    return 0
 
 
 if __name__ == "__main__":

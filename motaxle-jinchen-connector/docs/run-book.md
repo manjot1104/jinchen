@@ -16,7 +16,7 @@ If you find a filled password anywhere in the repository, stop and tell the lead
 
 1. Press Ctrl+C in the terminal where `python3 server.py` runs.
 2. Run `python3 server.py` again and open http://127.0.0.1:8765.
-3. The ledger is in memory. A restart starts at raw 500 kg, both switches off, an empty Message log, and WO-2401 open. Files already in `inbox/done/` stay there and are not read again.
+3. The ledger is persisted in `inbox/ledger.jsonl`. The desk starts where the last session ended (raw, WIP, hold, stock entries and the Message log). Files already in `inbox/done/` stay there and are not read again.
 
 If the desk does not start:
 
@@ -27,7 +27,7 @@ If the desk does not start:
 | *config.json weight needs kg_per_piece above 0 and loss_allowance from 0 to 1.* | Fix the `weight` block, or remove it to use 1.20 and 0.05. |
 | `Address already in use` | Another desk holds 8765. `lsof -i :8765` names it. Stop that one, not a stranger's process. |
 
-**Reset job** on the Today screen does the same as a restart without stopping the server, and reloads `config.json` (including updated `weight` settings).
+**Reset job** on the Today screen clears the ledger, the message log, the STE counter, reloads `config.json` (including updated `weight` settings), and moves previous files in `inbox/done/` and `inbox/results/` to `inbox/archive/<time>/done/` and `inbox/archive/<time>/results/` when the message log is cleared, so document numbering starts fresh from STE-0001.
 
 ## The two switches
 
@@ -46,7 +46,7 @@ A replay must never move stock twice. This is how to show it:
 
 Replay on the desk: **Send J-100 again**, **Send R-1 again** and **Send C-1 again** do the same from buttons.
 
-A confirmation is not checked for repeats in the stand-in. Replaying `03-confirm-op10.json` stores it a second time. It moves no stock.
+A replayed confirmation gives E-DUP (*Already confirmed. Not stored again.*) and is not stored a second time. It moves no stock.
 
 ## Hold and cancel
 

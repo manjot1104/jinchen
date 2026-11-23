@@ -22,6 +22,7 @@ def reconcile(connector, results_dir):
     ledger_entries = {entry.name for entry in connector.ledger.entries}
 
     stock_results_count = 0
+    seen_documents = set()
     missing_entry = []
     unreadable = []
     referenced_entries = set()
@@ -35,7 +36,7 @@ def reconcile(connector, results_dir):
 
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, UnicodeDecodeError):
+            except (json.JSONDecodeError, UnicodeDecodeError, OSError):
                 unreadable.append(path.name)
                 continue
 
@@ -50,7 +51,9 @@ def reconcile(connector, results_dir):
             if status != "Posted" or not document:
                 continue
 
-            stock_results_count += 1
+            if document not in seen_documents:
+                seen_documents.add(document)
+                stock_results_count += 1
             if document in ledger_entries:
                 referenced_entries.add(document)
             else:
