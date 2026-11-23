@@ -113,6 +113,11 @@ def read_next(
         message = None
 
     move_to_done = True
+    work_order = (
+        str(message.get("work_order") or "")
+        if isinstance(message, dict)
+        else ""
+    )
 
     if not isinstance(message, dict):
         result_data = {
@@ -120,6 +125,7 @@ def read_next(
             "code": "E-ITEM",
             "document": "",
             "message": "Inbox file must contain a valid JSON object.",
+            "work_order": "",
         }
     elif switch_a and message.get("kind") in STOCK_KINDS:
         result_data = {
@@ -127,6 +133,7 @@ def read_next(
             "code": "",
             "document": "",
             "message": QUEUED_MESSAGE,
+            "work_order": work_order,
         }
         move_to_done = False
     else:
@@ -144,6 +151,7 @@ def read_next(
                 "code": "E-ITEM",
                 "document": "",
                 "message": "File could not be processed.",
+                "work_order": work_order,
             }
         else:
             result_data = {
@@ -151,6 +159,7 @@ def read_next(
                 "code": result.code,
                 "document": result.document,
                 "message": result.message,
+                "work_order": work_order,
             }
 
     done_directory.mkdir(parents=True, exist_ok=True)

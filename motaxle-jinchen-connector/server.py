@@ -9,6 +9,7 @@ import json
 import os
 import sys
 import threading
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import unquote
 
@@ -35,6 +36,7 @@ class Desk:
         self.switch_a = False
         self.switch_b = False
         self.released = False
+        self.last_successful_call = None
 
     def reset(self):
         self.connector = Connector(weight=self.weight)
@@ -42,6 +44,32 @@ class Desk:
         self.switch_a = False
         self.switch_b = False
         self.released = False
+        self.last_successful_call = None
+
+    def _update_last_successful_call(self):
+        self.last_successful_call = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    def counts(self):
+        posted = 0
+        business_rejected = 0
+        dead = 0
+        for row in self.attempts:
+            status = row.get("status", "")
+            if status in ("Posted", "Sent"):
+                posted += 1
+            elif status in ("Business Rejected", "Rejected"):
+                business_rejected += 1
+            else:
+                dead += 1
+        total = posted + business_rejected + dead
+        difference = len(self.attempts) - total
+        return {
+            "posted": posted,
+            "business_rejected": business_rejected,
+            "dead": dead,
+            "total": total,
+            "difference": difference,
+        }
 
     def run(self, action_id):
         spec = ACTIONS.get(action_id)
@@ -58,6 +86,7 @@ class Desk:
         for source, result in zip(files, results):
             row = {
                 "id": source.name,
+                "work_order": result.get("work_order", ""),
                 "status": result["status"],
                 "code": result["code"],
                 "document": result["document"],
@@ -65,6 +94,8 @@ class Desk:
             }
             self.attempts.append(row)
             last_result = row
+            if result.get("status") in ("Posted", "Sent"):
+                self._update_last_successful_call()
 
         payload = self.payload(last_result)
         payload["inbox_message"] = (
@@ -75,10 +106,23 @@ class Desk:
         return payload
 
     def apply(self, label, message, drop_log=False):
-        kind = (message or {}).get("kind") or ""
+        if not isinstance(message, dict):
+            row = {
+                "id": str(label or "custom"),
+                "work_order": "",
+                "status": "Business Rejected",
+                "code": "E-ITEM",
+                "document": "",
+                "message": "Unknown message.",
+            }
+            self.attempts.append(row)
+            return row
+        kind = message.get("kind") or ""
+        work_order = str(message.get("work_order") or "")
         if self.switch_a and kind in ("issue", "return", "disposition", "receipt"):
             row = {
                 "id": label or message.get("id") or kind,
+                "work_order": work_order,
                 "status": "Queued",
                 "code": "",
                 "document": "",
@@ -110,12 +154,15 @@ class Desk:
             text = text + " The stock entry was saved, then the log write failed."
         row = {
             "id": label or message.get("id") or kind,
+            "work_order": work_order,
             "status": result.status,
             "code": result.code,
             "document": result.document,
             "message": text,
         }
         self.attempts.append(row)
+        if result.status in ("Posted", "Sent"):
+            self._update_last_successful_call()
         return row
 
     def set_switch(self, name, on):
@@ -128,10 +175,12 @@ class Desk:
         return True
 
     def release(self):
+        work_order = "WO-2401"
         # US-082: a cancelled order stays cancelled, whoever presses Release.
         if self.connector.order_state.get("WO-2401") == "cancelled":
             row = {
                 "id": "release",
+                "work_order": work_order,
                 "status": "Business Rejected",
                 "code": "E-CLOSED",
                 "document": "",
@@ -140,6 +189,7 @@ class Desk:
         elif self.switch_b:
             row = {
                 "id": "release",
+                "work_order": work_order,
                 "status": "Stopped",
                 "code": "",
                 "document": "",
@@ -149,11 +199,13 @@ class Desk:
             self.released = True
             row = {
                 "id": "release",
+                "work_order": work_order,
                 "status": "Sent",
                 "code": "",
                 "document": "",
                 "message": "WO-2401 release was recorded on this desk. Jinchen was not called.",
             }
+            self._update_last_successful_call()
         self.attempts.append(row)
         return row
 
@@ -221,6 +273,8 @@ class Desk:
             "entries": entries,
             "capa": connector.ledger.capa,
             "attempts": self.attempts,
+            "counts": self.counts(),
+            "last_successful_call": self.last_successful_call,
             "catalog": CATALOG,
             "suggested": suggested,
             "issued": whole(issued),
@@ -533,7 +587,7 @@ PAGE = """<!DOCTYPE html>
     <section id="view-trace" class="hidden"></section>
     <section id="logtools" class="panel hidden">
       <h2>Find in the log</h2>
-      <input id="log-filter" placeholder="E-DUP, H-441, STE-0001">
+      <input id="log-filter" placeholder="WO-2401, E-DUP, H-441, STE-0001">
     </section>
     <section id="view-log" class="hidden"></section>
     <section id="view-inbox" class="hidden"></section>
@@ -613,7 +667,9 @@ function paint() {
     "<tr><td>Pieces accounted</td><td>" + state.accounted + " of 100</td></tr>" +
     "<tr><td>Finished goods</td><td>" + state.bins.finished + "</td></tr>" +
     "<tr><td>CAPA</td><td>" + state.capa + "</td></tr>" +
-    "<tr><td>Connector documents</td><td>" + state.entries.length + "</td></tr></table>" +
+    "<tr><td>Connector documents</td><td>" + state.entries.length + "</td></tr>" +
+    "<tr><td>Last successful call</td><td>" + (state.last_successful_call || "None yet") + "</td></tr>" +
+    "<tr><td>Day's counts</td><td>" + (state.counts ? (state.counts.posted + " posted, " + state.counts.business_rejected + " rejected, " + state.counts.dead + " dead") : "0 posted, 0 rejected, 0 dead") + "</td></tr></table>" +
     '<div class="bar"><i class="hold" style="width:' + state.bins.hold + '%"></i><i class="rej" style="width:' + state.bins.rejection + '%"></i><i class="rw" style="width:' + state.bins.rework + '%"></i><i class="sc" style="width:' + state.bins.scrap + '%"></i></div>' +
     '<p class="muted">The bar is the 100 pieces: hold, rejection, rework, scrap.</p>' +
     (next ? '<p><button class="go" type="button" data-tab="' + next.screen + '">Next: ' + next.title + "</button></p>" : '<p class="muted">The walk for this job is done. Open Trace and look up B-1.</p>') +
@@ -664,13 +720,23 @@ function paint() {
 
   const query = (document.getElementById("log-filter").value || "").toLowerCase();
   const shown = state.attempts.filter(function (row) {
-    const blob = (row.id + " " + row.code + " " + row.status + " " + row.document + " " + row.message).toLowerCase();
+    const blob = (row.id + " " + (row.work_order || "") + " " + row.code + " " + row.status + " " + row.document + " " + row.message).toLowerCase();
     return !query || blob.indexOf(query) >= 0;
   });
+  const counts = state.counts || {posted: 0, business_rejected: 0, dead: 0, total: 0, difference: 0};
+  const lastCall = state.last_successful_call || "None yet";
+  const countsHtml = '<div class="strip" style="grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); margin-bottom: 14px;">' +
+    '<div class="bin"><span>Posted</span><b>' + counts.posted + '</b><em>messages</em></div>' +
+    '<div class="bin"><span>Business Rejected</span><b>' + counts.business_rejected + '</b><em>messages</em></div>' +
+    '<div class="bin"><span>Dead</span><b>' + counts.dead + '</b><em>messages</em></div>' +
+    '<div class="bin"><span>Last Successful Call</span><b style="font-size:14px; margin-top:6px;">' + lastCall + '</b><em>difference: ' + counts.difference + '</em></div>' +
+    '</div>';
+
   document.getElementById("view-log").innerHTML = '<section class="panel"><h2>Messages this desk has handled</h2>' +
-    (shown.length ? '<table><tr><th>Message</th><th>Result</th><th>Document</th><th>What happened</th></tr>' +
+    countsHtml +
+    (shown.length ? '<table><tr><th>Message</th><th>Work order</th><th>Result</th><th>Document</th><th>What happened</th></tr>' +
       shown.map(function (row) {
-        return "<tr><td>" + row.id + "</td><td>" + (row.code || row.status) + "</td><td>" + (row.document || "-") + "</td><td>" + row.message + "</td></tr>";
+        return "<tr><td>" + row.id + "</td><td>" + (row.work_order || "-") + "</td><td>" + (row.code || row.status) + "</td><td>" + (row.document || "-") + "</td><td>" + row.message + "</td></tr>";
       }).join("") + "</table>" : '<p class="muted">Nothing in this filter.</p>') +
     (state.entries.length ? '<h2 style="margin-top:16px">Stock documents</h2><table><tr><th>Document</th><th>Message</th><th>From</th><th>To</th><th>Qty</th></tr>' +
       state.entries.map(function (entry) {
