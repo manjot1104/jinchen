@@ -1012,7 +1012,14 @@ def main():
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     print("Open http://%s:%d" % (HOST, PORT), flush=True)
     print("Ctrl+C stops it.", flush=True)
-    server.serve_forever()
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+    print("The desk stopped.", flush=True)
+    return 0
 
 
 if __name__ == "__main__":
