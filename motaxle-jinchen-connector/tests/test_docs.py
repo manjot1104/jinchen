@@ -76,5 +76,41 @@ class DecisionsDoc(unittest.TestCase):
             self.assertIn("US-", cells[4])
 
 
+class PocNotes(unittest.TestCase):
+    """The POC drafts for US-010, US-011, US-012, US-014 and US-064 match the code."""
+
+    def test_reason_list_matches_the_code(self):
+        from connector.poc import DECISION_WAREHOUSE, REASONS
+        rows = re.findall(r"^\| ([a-z-]+) \| ([a-z]+) \| ([A-Za-z ]+?) \|$", read(DOCS / "reason-list.md"), re.M)
+        self.assertEqual({reason: decision for reason, decision, _ in rows}, REASONS)
+        for _, decision, warehouse in rows:
+            self.assertEqual(DECISION_WAREHOUSE[decision], warehouse)
+
+    def test_master_data_lists_the_seven_warehouses(self):
+        from connector import poc
+        text = read(DOCS / "master-data.md")
+        for name in (poc.RAW, poc.WIP, poc.HOLD, poc.FG, poc.REJECTION, poc.REWORK, poc.SCRAP):
+            self.assertIn("| Warehouse | " + name + " |", text)
+        order = ["Company", "UOM", "Warehouses", "Items", "BOM", "Batch H-441", "Opening stock"]
+        positions = [text.index(word, text.index("## Load order")) for word in order]
+        self.assertEqual(positions, sorted(positions))
+
+    def test_interface_note_marks_each_message_once(self):
+        text = read(DOCS / "interface-note.md")
+        marks = dict(re.findall(r"^\| (M\d+) \|[^|]+\|[^|]+\| ([^|]+?) \|", text, re.M))
+        self.assertEqual(sorted(marks, key=lambda m: int(m[1:])), ["M%d" % n for n in range(1, 11)])
+        for mark in marks.values():
+            self.assertIn(mark, ("In scope", "Out of scope", "By hand", "Link only"))
+
+    def test_interface_note_answers_fifteen_questions(self):
+        text = read(DOCS / "interface-note.md").split("## The fifteen workshop questions")[1].split("\n## ")[0]
+        numbers = re.findall(r"^\| (\d+) \|", text, re.M)
+        self.assertEqual(numbers, [str(n) for n in range(1, 16)])
+
+    def test_acceptance_doc_points_at_the_demo_script(self):
+        self.assertIn("demo/SCRIPT.txt", read(DOCS / "poc-acceptance.md"))
+        self.assertTrue((PROJECT / "demo" / "SCRIPT.txt").is_file())
+
+
 if __name__ == "__main__":
     unittest.main()
