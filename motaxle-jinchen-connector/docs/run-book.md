@@ -27,7 +27,7 @@ If the desk does not start:
 | *config.json weight needs kg_per_piece above 0 and loss_allowance from 0 to 1.* | Fix the `weight` block, or remove it to use 1.20 and 0.05. |
 | `Address already in use` | Another desk holds 8765. `lsof -i :8765` names it. Stop that one, not a stranger's process. |
 
-**Reset job** on the Today screen clears the ledger, the message log, the STE counter, and moves previous files in `inbox/results/` and `inbox/done/` to a timestamped folder in `inbox/archive/<time>/` when the message log is cleared so document numbering starts fresh from STE-0001.
+**Reset job** on the Today screen clears the ledger, the message log, the STE counter, and moves previous files in `inbox/done/` and `inbox/results/` to `inbox/archive/<time>/done/` and `inbox/archive/<time>/results/` when the message log is cleared, so document numbering starts fresh from STE-0001.
 
 ## The two switches
 
