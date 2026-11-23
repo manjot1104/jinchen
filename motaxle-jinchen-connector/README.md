@@ -58,6 +58,7 @@ The Work order screen has **Hold**, **Resume** and **Cancel**. A held or cancell
 - [docs/message-contract.md](docs/message-contract.md): every field of every message, and the code returned when it is wrong. POC contract, not a signed Jinchen API.
 - [docs/run-book.md](docs/run-book.md): restart, switches, replay, and who owns the test passwords.
 - [docs/decisions.md](docs/decisions.md): the lead's decisions, with dates and the stories they unblock.
+- [docs/deployment.md](docs/deployment.md): where the connector runs, outside ERPNext and the Motaxle app, and how to start, stop and restart it.
 
 ## How we work
 

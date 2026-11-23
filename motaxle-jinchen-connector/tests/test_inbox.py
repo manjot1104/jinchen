@@ -6,6 +6,7 @@ from pathlib import Path
 
 from unittest import mock
 
+import tests
 from connector.inbox import copy_samples, list_inbox, read_all, read_next
 from connector.poc import Connector
 
@@ -22,6 +23,38 @@ def temp_inbox(root):
 
 
 class InboxTests(unittest.TestCase):
+    def test_default_inbox_folders_are_isolated(self):
+        import connector.inbox
+
+        self.assertNotEqual(connector.inbox.INBOX_DIR, PROJECT / "inbox" / "in")
+        self.assertNotEqual(connector.inbox.DONE_DIR, PROJECT / "inbox" / "done")
+        self.assertNotEqual(connector.inbox.RESULTS_DIR, PROJECT / "inbox" / "results")
+
+        sample_file = SAMPLES / ISSUE_FILE
+        target = connector.inbox.INBOX_DIR / "sample.json"
+        target.write_bytes(sample_file.read_bytes())
+
+        with tempfile.NamedTemporaryFile("w+", suffix=".json", delete=False) as cf:
+            json.dump({"mode": "test", "live_password": ""}, cf)
+            temp_config = Path(cf.name)
+
+        try:
+            c = Connector()
+            results = read_all(c, config_path=temp_config)
+            self.assertEqual(len(results), 1)
+            self.assertFalse(target.exists())
+            done_files = list(connector.inbox.DONE_DIR.glob("*.json"))
+            result_files = list(connector.inbox.RESULTS_DIR.glob("*.json"))
+            self.assertEqual(len(done_files), 1)
+            self.assertEqual(len(result_files), 1)
+        finally:
+            if temp_config.exists():
+                temp_config.unlink()
+            for f in connector.inbox.DONE_DIR.glob("*.json"):
+                f.unlink()
+            for f in connector.inbox.RESULTS_DIR.glob("*.json"):
+                f.unlink()
+
     def test_log_failure_replay_does_not_duplicate_stock(self):
         project = Path(__file__).resolve().parent.parent
         sample = project / "inbox" / "samples" / "01-issue-J-100-log-fails.json"
