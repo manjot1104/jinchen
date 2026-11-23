@@ -59,6 +59,10 @@ The Work order screen has **Hold**, **Resume** and **Cancel**. A held or cancell
 - [docs/run-book.md](docs/run-book.md): restart, switches, replay, and who owns the test passwords.
 - [docs/decisions.md](docs/decisions.md): the lead's decisions, with dates and the stories they unblock.
 - [docs/deployment.md](docs/deployment.md): where the connector runs, outside ERPNext and the Motaxle app, and how to start, stop and restart it.
+- [docs/interface-note.md](docs/interface-note.md): POC draft of the interface note: the ten messages marked, the system of record, and the fifteen workshop answers. Not signed yet.
+- [docs/reason-list.md](docs/reason-list.md): the scrap, rejection and rework reasons, one decision each.
+- [docs/master-data.md](docs/master-data.md): every master the POC needs, with owner, doctype, key field and load order.
+- [docs/poc-acceptance.md](docs/poc-acceptance.md): how the POC is demonstrated, and the acceptance checklist.
 
 ## How we work
 
