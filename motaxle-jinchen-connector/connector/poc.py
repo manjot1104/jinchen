@@ -133,6 +133,41 @@ class Entry:
     against: str = ""
 
 
+# US-025: a log row's status is always one of these seven.
+LOG_STATUSES = ("Queued", "Sent", "Posted", "Business Rejected", "Technical Failed", "Dead", "Replayed")
+# Messages that go from ERPNext to Jinchen (M3). Everything else comes from Jinchen.
+OUTBOUND_KINDS = ("hold", "resume", "cancel", "release")
+# Fields copied from the message into "received", as they arrived.
+RECEIVED_FIELDS = ("item", "qty", "uom", "batch", "serial", "operation",
+                   "completed", "rejected", "rework", "scrap")
+# A key holding any of these words is never stored in the log.
+SECRET_WORDS = ("password", "token", "secret", "api_key", "apikey")
+MASK = "***"
+
+
+def _scrub(value):
+    """A copy of value with every secret-looking key's value replaced by ***."""
+    if isinstance(value, dict):
+        return {
+            key: (MASK if any(word in str(key).lower() for word in SECRET_WORDS) else _scrub(item))
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_scrub(item) for item in value]
+    return value
+
+
+def _repeat_key(ref, work_order, kind, message):
+    """The key a repeat is checked on: id, work order and kind (operation for a confirmation)."""
+    if not ref:
+        return ""
+    if kind == "confirm":
+        operation = _operation(message or {})
+        if operation not in (None, False):
+            return "%s|%s|op%s" % (ref, work_order, operation)
+    return "%s|%s|%s" % (ref, work_order, kind)
+
+
 @dataclass
 class LogRow:
     ref: str
@@ -144,6 +179,13 @@ class LogRow:
     quantities: dict = field(default_factory=dict)
     attempt_id: str = ""
     entry: dict = field(default_factory=dict)
+    # US-025: the rest of the twelve log fields (see docs/message-log.md).
+    direction: str = ""
+    repeat_key: str = ""
+    received: dict = field(default_factory=dict)
+    posted: dict = field(default_factory=dict)
+    attempts: int = 1
+    payload: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -240,6 +282,7 @@ class Connector:
         self.inspection_required = True
         self.log_file_error = False
         self._attempt_id = ""
+        self._message = None
         self._last_queued_attempts = {}
         self._seed()
         self._load_ste_counter()
@@ -447,6 +490,15 @@ class Connector:
                 row_kwargs = {f.name: obj.get(f.name, "") for f in fields(LogRow)}
                 row_kwargs["quantities"] = q if isinstance(q, dict) else {}
                 row_kwargs["entry"] = obj.get("entry") if isinstance(obj.get("entry"), dict) else {}
+                # US-025 fields. A row written before them loads with empty values.
+                for dict_field in ("received", "posted", "payload"):
+                    value = obj.get(dict_field)
+                    row_kwargs[dict_field] = value if isinstance(value, dict) else {}
+                attempts = obj.get("attempts")
+                row_kwargs["attempts"] = attempts if isinstance(attempts, int) and not isinstance(attempts, bool) and attempts > 0 else 1
+                for str_field in ("direction", "repeat_key"):
+                    if not isinstance(row_kwargs[str_field], str):
+                        row_kwargs[str_field] = ""
 
                 # Validate types per row (Item 2)
                 for str_field in ("ref", "work_order", "kind", "status", "code", "document", "attempt_id"):
@@ -563,8 +615,8 @@ class Connector:
                 elif row.kind == "resume":
                     self.order_state.pop(row.work_order, None)
 
-    def record_attempt(self, ref, work_order, kind, status, code, document, drop_log=False, quantities=None, attempt_id="", entry=None):
-        self._log(ref, work_order, kind, status, code, document, drop_log=drop_log, quantities=quantities, attempt_id=attempt_id, entry=entry)
+    def record_attempt(self, ref, work_order, kind, status, code, document, drop_log=False, quantities=None, attempt_id="", entry=None, message=None):
+        self._log(ref, work_order, kind, status, code, document, drop_log=drop_log, quantities=quantities, attempt_id=attempt_id, entry=entry, message=message)
 
     def record_queued(self, attempt_id, message=None):
         """Record a Queued attempt for Switch A, skipping duplicate log rows."""
@@ -580,14 +632,35 @@ class Connector:
             return False
 
         self._last_queued_attempts[q_key] = True
-        self.record_attempt(ref or attempt_id, work_order, kind, "Queued", "", "", drop_log=False, quantities=None, attempt_id=attempt_id)
+        self.record_attempt(ref or attempt_id, work_order, kind, "Queued", "", "", drop_log=False, quantities=None, attempt_id=attempt_id, message=message if isinstance(message, dict) else None)
         return True
 
-    def _log(self, ref, work_order, kind, status, code, document, drop_log=False, quantities=None, attempt_id="", entry=None):
+    def _log(self, ref, work_order, kind, status, code, document, drop_log=False, quantities=None, attempt_id="", entry=None, message=None):
+        if status not in LOG_STATUSES:
+            raise ValueError("Log status must be one of %s." % ", ".join(LOG_STATUSES))
         if drop_log:
             return
         aid = attempt_id or getattr(self, "_attempt_id", "")
-        row = LogRow(ref, work_order, kind, status, code, document, dict(quantities or {}), aid, dict(entry or {}))
+        if message is None:
+            message = getattr(self, "_message", None) or {}
+        entry = dict(entry or {})
+        key = _repeat_key(ref, work_order, kind, message)
+        if entry.get("name"):
+            posted = {name: entry.get(name) for name in ("item", "qty", "uom", "batch")}
+        elif status == "Posted" and quantities:
+            posted = dict(quantities)
+        else:
+            posted = {}
+        row = LogRow(
+            ref, work_order, kind, status, code, document, dict(quantities or {}), aid, entry,
+            direction="ERPNext to Jinchen" if kind in OUTBOUND_KINDS else "Jinchen to ERPNext",
+            repeat_key=key,
+            received=_scrub({name: message[name] for name in RECEIVED_FIELDS if name in message}),
+            posted=posted,
+            # Every earlier row with the same key is an earlier attempt. None is ever deleted.
+            attempts=1 + sum(1 for old in self.log if key and old.repeat_key == key),
+            payload=_scrub(message),
+        )
         self.log.append(row)
         q_key = (ref, work_order, kind) if ref else (aid, work_order, kind)
         if status == "Queued":
@@ -608,12 +681,15 @@ class Connector:
 
     def process(self, message, drop_log=False, attempt_id=""):
         self._attempt_id = attempt_id
+        self._message = None
         try:
             if not isinstance(message, dict):
                 # No id to log against. A list, None, or a string is not a message.
                 return Result("Business Rejected", "E-ITEM", "", "Unknown message.")
             # Work on a copy. The caller's dictionary is never changed.
             message = dict(message)
+            # The log keeps the message as it was received (US-025).
+            self._message = dict(message)
             kind = message.get("kind")
             ref_raw = message.get("id")
             wo_raw = message.get("work_order")
@@ -690,6 +766,7 @@ class Connector:
             return handler(message, drop_log)
         finally:
             self._attempt_id = ""
+            self._message = None
 
     def _issue(self, message, drop_log):
         ref = message["id"]

@@ -260,11 +260,14 @@ class Desk:
                 "document": "",
                 "message": "WO-2401 release was recorded on this desk. Jinchen was not called.",
             }
+        # The log keeps one of the seven statuses (US-025). Switch B refuses
+        # the release, so its "Stopped" is logged as Business Rejected.
+        log_status = "Business Rejected" if row["status"] == "Stopped" else row["status"]
         self.connector.record_attempt(
             "WO-2401",
             "WO-2401",
             "release",
-            row["status"],
+            log_status,
             row["code"],
             row["document"],
             drop_log=False,
