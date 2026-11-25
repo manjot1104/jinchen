@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from connector.poc import ConfigError, Connector, LOG_FILE_ERROR_MESSAGE
 import connector.inbox as inbox_folders
+from connector import exceptions as exception_view
 from connector.inbox import copy_samples, list_inbox, load_config, read_all
 
 HOST = "127.0.0.1"
@@ -298,6 +299,21 @@ class Desk:
         self.attempts.append(row)
         return row
 
+    def replay(self, row, role):
+        """Replay one log row for Support (US-029). A planner is refused."""
+        answer = exception_view.replay(self.connector, row, role)
+        if not answer["ok"]:
+            return {"id": "replay", "status": "Refused", "code": "", "document": "", "message": answer["message"]}
+        result = {
+            "id": "replay of row %s" % answer["row"],
+            "status": answer["status"],
+            "code": answer["code"],
+            "document": answer["document"],
+            "message": self._take_log_error(answer["message"]),
+        }
+        self.attempts.append(result)
+        return result
+
     def payload(self, result=None):
         connector = self.connector
         kg = connector.kg()
@@ -374,6 +390,8 @@ class Desk:
             "order_state": self.connector.order_state.get("WO-2401", "open"),
             "result": result,
             "inbox_files": [item.name for item in list_inbox()],
+            "exceptions": exception_view.exception_list(connector),
+            "health": exception_view.safe_health(connector),
         }
 
 
@@ -677,12 +695,13 @@ PAGE = """<!DOCTYPE html>
       <input id="log-filter" placeholder="E-DUP, H-441, STE-0001">
     </section>
     <section id="view-log" class="hidden"></section>
+    <section id="view-exceptions" class="hidden"></section>
     <section id="view-inbox" class="hidden"></section>
   </main>
 </div>
 <script>
-const screens = ["today","order","material","operations","quality","trace","log","inbox"];
-const titles = {today:"Today", order:"Work order", material:"Material", operations:"Operations", quality:"Quality", trace:"Trace", log:"Message log", inbox:"Inbox"};
+const screens = ["today","order","material","operations","quality","trace","log","exceptions","inbox"];
+const titles = {today:"Today", order:"Work order", material:"Material", operations:"Operations", quality:"Quality", trace:"Trace", log:"Message log", exceptions:"Exceptions", inbox:"Inbox"};
 const bins = [["raw","Raw store","kg"],["wip","Forging WIP","kg"],["hold","QC hold","pcs"],["finished","Finished","pcs"],["rejection","Rejection","pcs"],["rework","Rework","pcs"],["scrap","Scrap","pcs"]];
 let state = null;
 let view = "today";
@@ -819,6 +838,8 @@ function paint() {
       }).join("") + "</table>" : "") +
     "</section>";
 
+  paintExceptions();
+
   const inboxFiles = state.inbox_files || [];
   const inboxList = inboxFiles.map(function (name) {
     const item = document.createElement("li");
@@ -848,6 +869,62 @@ function paint() {
   const own = view === "material" || view === "operations" || view === "quality";
   document.getElementById("composer").className = own ? "panel" : "panel hidden";
   document.getElementById("logtools").className = view === "log" ? "panel" : "panel hidden";
+}
+
+// Text from the log is shown as text, never as markup.
+function esc(value) {
+  return String(value === null || value === undefined ? "" : value)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+let replayRole = "Support";
+let payloadText = "";
+
+function paintExceptions() {
+  const rows = state.exceptions || [];
+  const health = state.health || {};
+  const roleOptions = ["Support", "Planner"].map(function (name) {
+    return '<option' + (name === replayRole ? " selected" : "") + ">" + name + "</option>";
+  }).join("");
+  document.getElementById("view-exceptions").innerHTML =
+    '<section class="panel"><h2>Health</h2><table>' +
+    "<tr><th>Check</th><td>" + esc(health.status) + "</td></tr>" +
+    "<tr><th>Last success</th><td>" + esc(health.last_success) + "</td></tr>" +
+    "<tr><th>Last failure</th><td>" + esc(health.last_failure) + "</td></tr>" +
+    "<tr><th>Dead</th><td>" + esc(health.dead) + "</td></tr></table>" +
+    (health.message ? '<p class="muted">' + esc(health.message) + "</p>" : "") +
+    '<p class="muted">The health view only reads the log. It creates no work order and no stock entry.</p></section>' +
+    '<section class="panel" style="margin-top:12px"><h2>Failed messages to fix</h2>' +
+    '<p>Acting as <select id="replay-role">' + roleOptions + "</select></p>" +
+    '<p class="muted">Posted rows are not listed. A row leaves the list once a replay posts it. Only Support can open the payload or replay.</p>' +
+    (rows.length
+      ? "<table><tr><th>Work order</th><th>Message</th><th>Item and qty</th><th>Code</th><th>Age (h)</th><th>Status</th><th></th></tr>" +
+        rows.map(function (row) {
+          const qty = row.item ? esc(row.item) + " " + esc(row.qty) + " " + esc(row.uom) : "-";
+          const age = row.age_hours === null ? "-" : esc(row.age_hours);
+          return "<tr><td>" + esc(row.work_order || "-") + "</td><td>" + esc(row.message || "-") + "</td><td>" + qty +
+            "</td><td>" + esc(row.code) + "</td><td>" + age + "</td><td>" + esc(row.status) + "</td><td>" +
+            '<button type="button" data-payload="' + row.row + '">Payload</button> ' +
+            '<button class="send" type="button" data-replay="' + row.row + '">Replay</button></td></tr>';
+        }).join("") + "</table>"
+      : '<p class="muted">No failed messages.</p>') +
+    '<pre id="payload-box" class="muted"></pre></section>';
+  document.getElementById("payload-box").textContent = payloadText;
+  document.getElementById("replay-role").onchange = function (event) { replayRole = event.target.value; };
+}
+
+async function replayRow(row) {
+  const response = await fetch("/api/replay", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({row: Number(row), role: replayRole})});
+  state = await response.json();
+  payloadText = "";
+  paint();
+}
+
+async function openPayload(row) {
+  const response = await fetch("/api/payload", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({row: Number(row), role: replayRole})});
+  const answer = await response.json();
+  payloadText = answer.ok ? JSON.stringify(answer.payload, null, 2) : answer.message;
+  paint();
 }
 
 function show(name) {
@@ -956,6 +1033,10 @@ document.body.addEventListener("click", function (event) {
   const sw = event.target.closest("[data-switch]");
   if (sw) { toggleSwitch(sw.getAttribute("data-switch")); return; }
   if (event.target.closest("[data-release]")) { releaseJob(); return; }
+  const replayButton = event.target.closest("[data-replay]");
+  if (replayButton) { replayRow(replayButton.getAttribute("data-replay")); return; }
+  const payloadButton = event.target.closest("[data-payload]");
+  if (payloadButton) { openPayload(payloadButton.getAttribute("data-payload")); return; }
   if (event.target.closest("[data-read-inbox]")) {
     readInbox();
     return;
@@ -1134,6 +1215,21 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 payload = DESK.payload()
             self.send_json(payload)
+            return
+        if path in ("/api/replay", "/api/payload"):
+            try:
+                body = read_body(self)
+            except json.JSONDecodeError:
+                self.send_json({"error": "Bad JSON"}, 400)
+                return
+            with LOCK:
+                if path == "/api/payload":
+                    answer = exception_view.open_payload(DESK.connector, body.get("row"), body.get("role"))
+                    self.send_json(answer, 200 if answer["ok"] else 403)
+                    return
+                result = DESK.replay(body.get("row"), body.get("role"))
+                payload = DESK.payload(result)
+            self.send_json(payload, 403 if result["status"] == "Refused" else 200)
             return
         if path == "/api/release":
             with LOCK:
