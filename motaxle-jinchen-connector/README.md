@@ -64,6 +64,7 @@ The Work order screen has **Hold**, **Resume** and **Cancel**. A held or cancell
 - [docs/master-data.md](docs/master-data.md): every master the POC needs, with owner, doctype, key field and load order.
 - [docs/poc-acceptance.md](docs/poc-acceptance.md): how the POC is demonstrated, and the acceptance checklist.
 - [docs/message-log.md](docs/message-log.md): the twelve fields of every log row, the seven statuses, and how secrets are masked.
+- [docs/exceptions.md](docs/exceptions.md): the exception list, replay by Support, and the health view.
 
 ## How we work
 

@@ -10,6 +10,7 @@ import json
 import math
 import os
 from dataclasses import asdict, dataclass, field, fields
+from datetime import datetime
 from pathlib import Path
 
 
@@ -186,6 +187,10 @@ class LogRow:
     posted: dict = field(default_factory=dict)
     attempts: int = 1
     payload: dict = field(default_factory=dict)
+    # US-029: when the attempt happened (local time, ISO, to the second), and
+    # for a replay, the number of the log row it replays (-1 when it is not one).
+    timestamp: str = ""
+    replay_of: int = -1
 
 
 @dataclass
@@ -304,6 +309,9 @@ class Connector:
         self._attempt_id = ""
         self._message = None
         self._last_queued_attempts = {}
+        # US-029: the clock the log rows are stamped with. Tests replace it.
+        self.clock = datetime.now
+        self._replay_of = -1
         self._seed()
         self._load_ste_counter()
         self._load_ledger()
@@ -516,7 +524,9 @@ class Connector:
                     row_kwargs[dict_field] = value if isinstance(value, dict) else {}
                 attempts = obj.get("attempts")
                 row_kwargs["attempts"] = attempts if isinstance(attempts, int) and not isinstance(attempts, bool) and attempts > 0 else 1
-                for str_field in ("direction", "repeat_key"):
+                replay_of = obj.get("replay_of")
+                row_kwargs["replay_of"] = replay_of if isinstance(replay_of, int) and not isinstance(replay_of, bool) and replay_of >= 0 else -1
+                for str_field in ("direction", "repeat_key", "timestamp"):
                     if not isinstance(row_kwargs[str_field], str):
                         row_kwargs[str_field] = ""
 
@@ -680,6 +690,8 @@ class Connector:
             # Every earlier row with the same key is an earlier attempt. None is ever deleted.
             attempts=1 + sum(1 for old in self.log if key and old.repeat_key == key),
             payload=_scrub(message),
+            timestamp=self.clock().isoformat(timespec="seconds"),
+            replay_of=self._replay_of,
         )
         self.log.append(row)
         q_key = (ref, work_order, kind) if ref else (aid, work_order, kind)
