@@ -74,21 +74,28 @@ order events. Notification settings are optional and use these defaults:
 ### Notification triggers
 
 - **Old unresolved failure:** Notify Support and Stores Manager after the
-  configured number of working hours.
-- **E-AMEND:** Notify Planner once for each eligible row.
+  configured number of working hours for failure statuses only
+  (`Business Rejected`, `Technical Failed`, `Dead`). `Posted` and `Sent` are
+  successful statuses, and `Queued` / `Replayed` do not generate failure
+  notifications.
+- **E-AMEND:** Notify Planner once for each eligible failure row.
 - **Repeated E-STOCK:** Notify Stores when the configured number of distinct
   E-STOCK events occurs for the same work order on the same date.
-- **Posted rows:** Rows with status `Posted` do not generate notifications.
-  A matching later Posted row also suppresses the old-failure alert.
+- **Posted suppression:** Rows with status `Posted` do not generate
+  notifications, and a matching later `Posted` row suppresses old-failure,
+  E-AMEND, and E-STOCK notifications for that record.
 
 ### Delivery and safety
 
-- Notifications contain safe metadata only. Raw payload text and secrets must
-  never be included.
-- Notification keys prevent duplicate alerts.
-- Sent notification state can be persisted across restarts.
-- An optional JSONL mailbox can store notifications. Mailbox writes are atomic.
-- A notification is marked as sent only after mailbox delivery succeeds.
+- Notifications contain safe metadata only, with secret-like tokens in
+  identifiers masked. Raw payload text and secrets are never included.
+- Notification keys include record kind/operation (falling back to `attempt_id`
+  when ID is empty) to prevent duplicate or colliding alerts.
+- Sent notification state (`inbox/notifications_state.json`) and append-only
+  JSONL mailbox (`inbox/notifications.jsonl`) persist across restarts under the
+  gitignored `inbox/` directory, and are surfaced on the Desk Exceptions view.
+- A notification is marked as sent only after mailbox delivery succeeds, and
+  mailbox entries are also restored into `sent_keys` on restart.
 
 ### Configuration
 

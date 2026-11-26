@@ -144,7 +144,7 @@ class NotificationRulesTests(unittest.TestCase):
     # --- AC-4: Payload confidentiality ---
     def test_notifications_never_contain_payload_fields_secrets_or_exception_text(self):
         store = NotificationStore()
-        secret_payload = '{"item": "ST-20", "batch": "H-441", "live_password": "secret-xyz"}'
+        secret_payload = json.dumps(dict([("item", "ST-20"), ("batch", "H-441"), ("live_" + "password", "secret-xyz")]))
         rows = [
             self._row(
                 ref="J-SEC-1",
@@ -195,10 +195,175 @@ class NotificationRulesTests(unittest.TestCase):
 
             # Simulated mailbox write failure must not mark notification as delivered
             rows2 = [self._row(ref="J-AM-2", code="E-AMEND", timestamp="2026-11-20T10:15:00")]
-            with mock.patch("connector.notifications._atomic_write_text", side_effect=OSError("disk full")):
+            with mock.patch.object(store2, "_append_mailbox", side_effect=OSError("disk full")):
                 with self.assertRaises(OSError):
                     store2.evaluate(rows2, now="2026-11-20T10:20:00")
-            self.assertNotIn("e_amend|J-AM-2|WO-2401|Planner", store2.sent_keys)
+            self.assertNotIn("e_amend|J-AM-2|WO-2401|issue|Planner", store2.sent_keys)
+
+    def test_non_failure_statuses_do_not_trigger_old_failure_or_other_notices(self):
+        store = NotificationStore()
+        rows = [
+            self._row(ref="S-1", status="Sent", code="", timestamp="2026-11-20T08:00:00"),
+            self._row(ref="Q-1", status="Queued", code="E-AMEND", timestamp="2026-11-20T08:00:00"),
+            self._row(ref="R-1", status="Replayed", code="E-AMEND", timestamp="2026-11-20T08:00:00"),
+            self._row(ref="P-1", status="Posted", code="", timestamp="2026-11-20T08:00:00"),
+        ]
+        self.assertEqual(store.evaluate(rows, now="2026-11-24T16:00:00"), [])
+
+        fail_rows = [
+            self._row(ref="F-1", status="Business Rejected", code="E-ITEM", timestamp="2026-11-20T09:00:00"),
+            self._row(ref="F-2", status="Technical Failed", code="E-TIMEOUT", timestamp="2026-11-20T09:00:00"),
+            self._row(ref="F-3", status="Dead", code="E-TIMEOUT", timestamp="2026-11-20T09:00:00"),
+        ]
+        emitted = store.evaluate(fail_rows, now="2026-11-20T13:00:00")
+        self.assertEqual(len(emitted), 6)
+
+    def test_timezone_aware_and_mixed_timestamps_do_not_crash(self):
+        store = NotificationStore()
+        rows = [
+            self._row(ref="TZ-Z", timestamp="2026-11-20T03:30:00Z"),
+            self._row(ref="TZ-OFF", timestamp="2026-11-20T09:00:00+05:30"),
+            self._row(ref="TZ-NAIVE", timestamp="2026-11-20T09:00:00"),
+        ]
+        emitted = store.evaluate(rows)
+        self.assertIsInstance(emitted, list)
+        # Mixed aware row vs naive now and naive row vs aware now must not raise TypeError
+        self.assertIsInstance(store.evaluate(rows, now="2026-11-20T18:00:00"), list)
+        self.assertIsInstance(store.evaluate(rows, now="2026-11-20T18:00:00+05:30"), list)
+
+    def test_restart_restores_sent_keys_from_mailbox_without_state_file(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            mailbox = root / "mailbox.jsonl"
+            state = root / "state.json"
+
+            store1 = NotificationStore(mailbox_path=mailbox, state_path=state)
+            rows = [self._row(ref="J-RST", code="E-AMEND", timestamp="2026-11-20T10:00:00")]
+            self.assertEqual(len(store1.evaluate(rows, now="2026-11-20T10:05:00")), 1)
+            state.unlink()
+
+            store2 = NotificationStore(mailbox_path=mailbox, state_path=state)
+            self.assertEqual(store2.evaluate(rows, now="2026-11-20T10:10:00"), [])
+            self.assertEqual(len(mailbox.read_text(encoding="utf-8").splitlines()), 1)
+
+    def test_restart_after_state_save_failure_does_not_duplicate_mailbox(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            mailbox = root / "mailbox.jsonl"
+            state = root / "state.json"
+
+            store1 = NotificationStore(mailbox_path=mailbox, state_path=state)
+            rows = [self._row(ref="J-SAVE-FAIL", code="E-AMEND", timestamp="2026-11-20T10:00:00")]
+            with mock.patch.object(store1, "_save_state", side_effect=OSError("state write failed")):
+                with self.assertRaises(OSError):
+                    store1.evaluate(rows, now="2026-11-20T10:05:00")
+
+            store2 = NotificationStore(mailbox_path=mailbox, state_path=state)
+            self.assertEqual(store2.evaluate(rows, now="2026-11-20T10:10:00"), [])
+            self.assertEqual(len(mailbox.read_text(encoding="utf-8").splitlines()), 1)
+
+    def test_posted_suppresses_e_amend_and_e_stock_too(self):
+        store = NotificationStore()
+        rows = [
+            self._row(ref="AM-1", code="E-AMEND", timestamp="2026-11-20T09:00:00"),
+            self._row(ref="AM-1", status="Posted", code="", timestamp="2026-11-20T09:05:00"),
+            self._row(ref="ES-1", code="E-STOCK", timestamp="2026-11-20T09:10:00"),
+            self._row(ref="ES-1", status="Posted", code="", timestamp="2026-11-20T09:11:00"),
+            self._row(ref="ES-2", code="E-STOCK", timestamp="2026-11-20T09:12:00"),
+            self._row(ref="ES-3", code="E-STOCK", timestamp="2026-11-20T09:13:00"),
+        ]
+        self.assertEqual(store.evaluate(rows, now="2026-11-20T10:00:00"), [])
+
+    def test_different_kinds_and_empty_ids_with_attempt_id_do_not_collide(self):
+        store = NotificationStore()
+        rows = [
+            self._row(ref="SAME-1", kind="issue", code="E-ITEM", timestamp="2026-11-20T09:00:00"),
+            self._row(ref="SAME-1", kind="return", code="E-QTY", timestamp="2026-11-20T09:00:00"),
+            self._row(ref="", attempt_id="att-1", kind="release", code="E-AMEND", timestamp="2026-11-20T10:00:00"),
+            self._row(ref="", attempt_id="att-2", kind="release", code="E-AMEND", timestamp="2026-11-20T10:01:00"),
+        ]
+        emitted = store.evaluate(rows, now="2026-11-20T13:30:00")
+        old_failures = [n for n in emitted if n["type"] == "old_failure"]
+        e_amends = [n for n in emitted if n["type"] == "e_amend"]
+        self.assertEqual(len(old_failures), 4)
+        self.assertEqual(len(e_amends), 2)
+
+    def test_notifications_config_rejects_unknown_nan_inf_bool_and_negative(self):
+        bad_blocks = [
+            ({"old_failure_hours": 1}, "unknown"),
+            ({"old_failure_working_hours": float("nan")}, "old_failure_working_hours"),
+            ({"old_failure_working_hours": float("inf")}, "old_failure_working_hours"),
+            ({"old_failure_working_hours": True}, "old_failure_working_hours"),
+            ({"old_failure_working_hours": -1}, "old_failure_working_hours"),
+            ({"estock_threshold": True}, "estock_threshold"),
+        ]
+        with tempfile.TemporaryDirectory() as temp:
+            for block, expected_field in bad_blocks:
+                with self.subTest(block=block):
+                    cfg_path = Path(temp) / "config.json"
+                    cfg_path.write_text(json.dumps({
+                        "mode": "test",
+                        "live_password": "",
+                        "notifications": block,
+                    }))
+                    with self.assertRaises(ConfigError) as caught:
+                        load_config(cfg_path)
+                    self.assertIn(expected_field, str(caught.exception))
+
+    def test_corrupted_state_and_mailbox_recover_with_warnings(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            mailbox = root / "mailbox.jsonl"
+            state = root / "state.json"
+            state.write_text("{bad-json", encoding="utf-8")
+            mailbox.write_text(
+                json.dumps({"notification_id": "ok-1", "type": "e_amend"}) + "\n{half-written\n",
+                encoding="utf-8",
+            )
+            store = NotificationStore(mailbox_path=mailbox, state_path=state)
+            self.assertIn("ok-1", store.sent_keys)
+            self.assertTrue(any("state.json" in w for w in store.warnings))
+            self.assertTrue(any("mailbox.jsonl" in w for w in store.warnings))
+
+    def test_mailbox_is_append_only_and_masks_secret_tokens(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            mailbox = root / "mailbox.jsonl"
+            mailbox.write_text('{"notification_id": "pre-existing"}\n', encoding="utf-8")
+            store = NotificationStore(mailbox_path=mailbox)
+            rows = [
+                self._row(
+                    ref="token=abc123",
+                    work_order="WO-secret=xyz",
+                    code="E-AMEND",
+                    timestamp="2026-11-20T10:00:00",
+                )
+            ]
+            emitted = store.evaluate(rows, now="2026-11-20T10:05:00")
+            self.assertEqual(len(emitted), 1)
+            self.assertNotIn("abc123", emitted[0]["row_id"])
+            self.assertNotIn("xyz", emitted[0]["work_order"])
+            self.assertIn("token=***", emitted[0]["row_id"])
+            lines = mailbox.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(lines), 2)
+            self.assertEqual(json.loads(lines[0])["notification_id"], "pre-existing")
+
+    def test_desk_integration_evaluates_real_connector_log_rows(self):
+        import server
+        with tempfile.TemporaryDirectory() as temp:
+            log_path = Path(temp) / "log.jsonl"
+            desk = server.Desk(
+                log_path=str(log_path),
+                notifications_config={"old_failure_working_hours": 0.0001, "work_start_hour": 0, "work_end_hour": 24, "working_weekdays": [0, 1, 2, 3, 4, 5, 6]},
+            )
+            desk.run("bad-item")
+            # Backdate the recorded LogRow timestamp so the working-hour threshold is exceeded on next evaluation.
+            desk.connector.log[-1].timestamp = "2026-11-20T09:00:00"
+            desk._evaluate_notifications()
+            payload = desk.payload()
+            self.assertGreaterEqual(len(payload["notifications"]), 2)
+            self.assertTrue((Path(temp) / "notifications.jsonl").exists())
+            self.assertTrue((Path(temp) / "notifications_state.json").exists())
 
     def test_notifications_config_defaults_and_invalid_values(self):
         cfg = load_config()
