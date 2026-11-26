@@ -65,6 +65,7 @@ The Work order screen has **Hold**, **Resume** and **Cancel**. A held or cancell
 - [docs/poc-acceptance.md](docs/poc-acceptance.md): how the POC is demonstrated, and the acceptance checklist.
 - [docs/message-log.md](docs/message-log.md): the twelve fields of every log row, the seven statuses, and how secrets are masked.
 - [docs/exceptions.md](docs/exceptions.md): the exception list, replay by Support, and the health view.
+- [docs/poc-findings.md](docs/poc-findings.md): what the POC proved, what it taught us, and the scope gap to the full build, story by story.
 
 ## How we work
 
