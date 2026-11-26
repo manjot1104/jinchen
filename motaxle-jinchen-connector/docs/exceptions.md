@@ -50,5 +50,5 @@ When the check fails, every field says `failed`, never blank, with the reason be
 ## Not in the POC
 
 - Roles are picked on the desk. There is no sign-in, so the role is not proven; the full build takes it from the ERPNext user.
-- Nothing writes Technical Failed or Dead yet, because there is no network call to retry (US-027). Both are listed when they appear.
+- `Technical Failed` and `Dead` rows are written to the main log when `Connector.process()` handles transient or non-retryable technical failures (US-027) and are listed in the Exceptions and Health views (`Dead` count).
 - Times are the desk computer's local time.

@@ -45,9 +45,11 @@ With Switch A on, issue, return, disposition, and receipt files are logged as Qu
 
 ## 7. Configuration
 
-`config.json` has `mode`, `live_password` and `weight`. The committed file is test mode with an empty password. `server.py` and the inbox reader read it before they start. A filled password in test mode stops both with *Test mode refuses to start when a live password is set.* A mode other than `test` or `live` stops both with *Mode must be test or live.* Do not commit a password.
+`config.json` has `mode`, `live_password`, `weight`, and optional `retry`. The committed file is test mode with an empty password. `server.py` and the inbox reader read it before they start. A filled password in test mode stops both with *Test mode refuses to start when a live password is set.* A mode other than `test` or `live` stops both with *Mode must be test or live.* Do not commit a password.
 
 `weight` holds `kg_per_piece` (1.2) and `loss_allowance` (0.05). A confirmation is refused with E-QTY when its pieces × 1.2 kg need more than the steel still out on the order × 1.05. Leave the block out to use those two values. A bad value stops the desk with *config.json weight needs kg_per_piece above 0 and loss_allowance from 0 to 1.*
+
+`retry` holds `max_retries` (5, meaning 1 initial attempt plus up to 5 retries, range 1..10), `initial_delay_seconds` (1.0, range >0..300), and `backoff_multiplier` (2.0, >1). Only `E-TIMEOUT` and transient connection drops are retried; `E-AUTH` and business rejections are never retried. Intermediate retry failures log `Technical Failed` and exhausted retries log `Dead` to the main message log.
 
 ## 8. Hold and cancel
 

@@ -1,15 +1,17 @@
-"""Regression tests for technical failure retries and Dead status."""
+"""Integration and regression tests for technical failure retries and Dead status (US-027)."""
 
 from datetime import datetime, timedelta
 import http.client
 import json
+import re
 import tempfile
 import unittest
 from pathlib import Path
 
+from connector import exceptions as exception_view
 from connector.inbox import load_config
-from connector.poc import ConfigError
-from connector.retry import DEFAULT_RETRY, RetryManager
+from connector.poc import ConfigError, Connector, LOG_STATUSES, Result
+from connector.retry import DEFAULT_RETRY, classify_failure
 
 
 class FakeClock:
@@ -22,183 +24,267 @@ class FakeClock:
         return current
 
 
-class RetryTests(unittest.TestCase):
-    def _make_manager(self, config=None, state_path=None):
+def _issue_msg(ref="J-100", work_order="WO-2401"):
+    return {
+        "kind": "issue",
+        "id": ref,
+        "work_order": work_order,
+        "item": "ST-20",
+        "qty": 120,
+        "uom": "Kg",
+        "batch": "H-441",
+        "from_warehouse": "Raw Material Store",
+        "to_warehouse": "Forging WIP",
+    }
+
+
+class RetryIntegrationTests(unittest.TestCase):
+    def _make_connector(self, retry_config=None, log_path=None):
         sleeps = []
         clock = FakeClock()
-        mgr = RetryManager(
-            config=config,
-            state_path=state_path,
-            clock=clock,
+        connector = Connector(
+            retry_config=retry_config,
             sleeper=sleeps.append,
+            log_path=log_path,
         )
-        return mgr, sleeps, clock
+        connector.clock = clock
+        return connector, sleeps, clock
 
-    def test_01_e_timeout_succeeds_after_retry(self):
-        mgr, sleeps, _ = self._make_manager()
+    def test_01_e_timeout_succeeds_after_retry_with_connector_process(self):
+        connector, sleeps, _ = self._make_connector()
         calls = {"n": 0}
 
-        def transport():
+        def transport(_msg):
             calls["n"] += 1
             if calls["n"] == 1:
-                return {"status": "Technical Failure", "code": "E-TIMEOUT"}
-            return {"status": "Posted", "code": "", "document": "STE-0001"}
+                return Result("Technical Failed", "E-TIMEOUT", "", "Timed out.")
+            return Result("Posted", "", "STE-0001", "Posted.")
 
-        row = mgr.run("J-100", "WO-2401", transport)
-        self.assertEqual(row["status"], "Posted")
-        self.assertEqual(row["document"], "STE-0001")
-        self.assertEqual(len(row["attempts"]), 2)
+        result = connector.process(_issue_msg(), transport=transport)
+        self.assertEqual(result.status, "Posted")
+        self.assertEqual(result.document, "STE-0001")
         self.assertEqual(sleeps, [1.0])
+        self.assertEqual([r.status for r in connector.log], ["Technical Failed", "Posted"])
+        self.assertEqual(exception_view.exception_list(connector), [])
 
-    def test_02_e_timeout_exhausts_default_5_total_attempts(self):
-        mgr, sleeps, _ = self._make_manager()
-        row = mgr.run("J-100", "WO-2401", lambda: {"status": "Technical Failure", "code": "E-TIMEOUT"})
-        self.assertEqual(len(row["attempts"]), 5)
-        self.assertEqual(len(sleeps), 4)
-        self.assertEqual(row["status"], "Dead")
-
-    def test_03_retry_delays_grow_strictly_between_consecutive_retries(self):
-        mgr, sleeps, _ = self._make_manager()
-        mgr.run("J-100", "WO-2401", lambda: {"status": "Technical Failure", "code": "E-TIMEOUT"})
-        self.assertEqual(sleeps, [1.0, 2.0, 4.0, 8.0])
-        for earlier, later in zip(sleeps, sleeps[1:]):
-            self.assertGreater(later, earlier)
-
-    def test_04_custom_attempt_count_works(self):
-        mgr, sleeps, _ = self._make_manager(config={"max_attempts": 3})
-        row = mgr.run("J-100", "WO-2401", lambda: {"status": "Technical Failure", "code": "E-TIMEOUT"})
-        self.assertEqual(len(row["attempts"]), 3)
-        self.assertEqual(len(sleeps), 2)
-        self.assertEqual(row["status"], "Dead")
-
-    def test_05_custom_delay_configuration_works(self):
-        mgr, sleeps, _ = self._make_manager(
-            config={"max_attempts": 4, "initial_delay_seconds": 0.5, "backoff_multiplier": 3.0}
+    def test_02_e_timeout_exhausts_default_5_retries_and_logs_dead_to_exceptions_and_health(self):
+        connector, sleeps, _ = self._make_connector()
+        result = connector.process(
+            _issue_msg(),
+            transport=lambda _m: Result("Technical Failed", "E-TIMEOUT", "", "Timed out."),
         )
-        mgr.run("J-100", "WO-2401", lambda: {"status": "Technical Failure", "code": "E-TIMEOUT"})
-        self.assertEqual(sleeps, [0.5, 1.5, 4.5])
+        # 1 initial attempt + 5 retries = 6 attempts; 5 sleeps: [1, 2, 4, 8, 16]
+        self.assertEqual(result.status, "Dead")
+        self.assertEqual(sleeps, [1.0, 2.0, 4.0, 8.0, 16.0])
+        self.assertEqual(len(connector.log), 6)
+        self.assertEqual([r.status for r in connector.log[:5]], ["Technical Failed"] * 5)
+        self.assertEqual(connector.log[-1].status, "Dead")
+        self.assertEqual(connector.log[-1].attempts, 6)
+        self.assertTrue(all(r.status in LOG_STATUSES for r in connector.log))
 
-    def test_06_e_auth_results_in_zero_retries(self):
-        mgr, sleeps, _ = self._make_manager()
+        health = exception_view.health(connector)
+        ex_list = exception_view.exception_list(connector)
+        self.assertEqual(health["dead"], 1)
+        self.assertEqual(len(ex_list), 1)
+        self.assertEqual(ex_list[0]["status"], "Dead")
+        self.assertEqual(ex_list[0]["code"], "E-TIMEOUT")
+
+    def test_03_custom_retry_count_and_backoff_control_behavior(self):
+        connector, sleeps, _ = self._make_connector(
+            retry_config={"max_retries": 3, "initial_delay_seconds": 0.5, "backoff_multiplier": 3.0}
+        )
+        result = connector.process(
+            _issue_msg(),
+            transport=lambda _m: {"status": "Technical Failed", "code": "E-TIMEOUT"},
+        )
+        self.assertEqual(result.status, "Dead")
+        self.assertEqual(sleeps, [0.5, 1.5, 4.5])
+        self.assertEqual(len(connector.log), 4)
+
+    def test_04_e_auth_never_retried_and_logged_as_technical_failed(self):
+        connector, sleeps, _ = self._make_connector()
         calls = {"n": 0}
 
-        def transport():
+        def transport(_msg):
             calls["n"] += 1
-            return {"status": "Auth Rejected", "code": "E-AUTH"}
+            return Result("Technical Failed", "E-AUTH", "", "Bad credentials.")
 
-        row = mgr.run("J-100", "WO-2401", transport)
+        result = connector.process(_issue_msg(), transport=transport)
         self.assertEqual(calls["n"], 1)
         self.assertEqual(sleeps, [])
-        self.assertEqual(len(row["attempts"]), 1)
-        self.assertEqual(row["status"], "Auth Rejected")
-        self.assertEqual(mgr.exception_list, [])
+        self.assertEqual(result.status, "Technical Failed")
+        self.assertEqual(result.code, "E-AUTH")
+        self.assertEqual([r.status for r in connector.log], ["Technical Failed"])
+        self.assertEqual(exception_view.health(connector)["dead"], 0)
+        self.assertEqual(len(exception_view.exception_list(connector)), 1)
 
-    def test_07_every_business_rejection_code_results_in_zero_retries(self):
+    def test_05_business_rejection_codes_never_retried(self):
         business_codes = (
             "E-DUP", "E-ITEM", "E-UOM", "E-WH", "E-BATCH", "E-STOCK",
             "E-QTY", "E-OP", "E-REASON", "E-QC", "E-CLOSED", "E-AMEND",
         )
         for code in business_codes:
-            mgr, sleeps, _ = self._make_manager()
-            row = mgr.run(f"J-{code}", "WO-2401", lambda c=code: {"status": "Business Rejected", "code": c})
+            connector, sleeps, _ = self._make_connector()
+            result = connector.process(
+                _issue_msg(ref=f"J-{code}"),
+                transport=lambda _m, c=code: {"status": "Business Rejected", "code": c},
+            )
             self.assertEqual(sleeps, [], code)
-            self.assertEqual(len(row["attempts"]), 1, code)
-            self.assertEqual(row["status"], "Business Rejected", code)
-            self.assertEqual(mgr.exception_list, [], code)
+            self.assertEqual(result.status, "Business Rejected", code)
+            self.assertEqual([r.status for r in connector.log], ["Business Rejected"], code)
 
-    def test_08_business_rejections_remain_business_rejected_after_overnight_gap(self):
-        mgr, sleeps, clock = self._make_manager()
-        row = mgr.run("J-BIZ", "WO-2401", lambda: {"status": "Business Rejected", "code": "E-ITEM"})
-        clock.now = clock.now + timedelta(hours=16)
-        polled = mgr.run("J-BIZ", "WO-2401", lambda: {"status": "Business Rejected", "code": "E-ITEM"})
-        self.assertEqual(polled["status"], "Business Rejected")
-        self.assertEqual(len(row["attempts"]), 1)
-        self.assertEqual(sleeps, [])
-        self.assertEqual(mgr.exception_list, [])
+    def test_06_empty_and_unknown_codes_on_technical_failed_stay_technical_failed(self):
+        for payload in (
+            {"status": "Technical Failed", "code": ""},
+            {"status": "Technical Failed", "code": "E-503"},
+            {"status": "", "code": "E-UNKNOWN"},
+        ):
+            with self.subTest(payload=payload):
+                connector, sleeps, _ = self._make_connector()
+                result = connector.process(_issue_msg(), transport=lambda _m, p=payload: p)
+                self.assertEqual(sleeps, [])
+                self.assertEqual(result.status, "Technical Failed")
+                self.assertEqual(connector.log[-1].status, "Technical Failed")
 
-    def test_09_dropped_connections_are_retried(self):
+        self.assertEqual(classify_failure(status="Business Rejected", code="E-ITEM"), "business")
+        self.assertEqual(classify_failure(status="Technical Failed", code=""), "technical")
+        self.assertEqual(classify_failure(status="Technical Failed", code="E-503"), "technical")
+
+    def test_07_dropped_connections_retried_and_non_transient_errors_not_retried(self):
         for exc_cls in (ConnectionResetError, TimeoutError, http.client.RemoteDisconnected):
-            mgr, sleeps, _ = self._make_manager()
+            connector, sleeps, _ = self._make_connector()
             calls = {"n": 0}
 
-            def transport(cls=exc_cls, state=calls):
+            def transport(_m, cls=exc_cls, state=calls):
                 state["n"] += 1
                 if state["n"] == 1:
                     raise cls("dropped")
-                return {"status": "Posted", "code": "", "document": "STE-0002"}
+                return Result("Posted", "", "STE-0002", "Posted.")
 
-            row = mgr.run("J-CONN", "WO-2401", transport)
-            self.assertEqual(row["status"], "Posted")
-            self.assertEqual(len(row["attempts"]), 2)
+            result = connector.process(_issue_msg(), transport=transport)
+            self.assertEqual(result.status, "Posted")
             self.assertEqual(sleeps, [1.0])
+            self.assertEqual([r.status for r in connector.log], ["Technical Failed", "Posted"])
 
-    def test_10_unrelated_exceptions_are_not_retried(self):
-        mgr, sleeps, _ = self._make_manager()
+        connector2, sleeps2, _ = self._make_connector()
 
-        def bad():
+        def bad(_m):
             raise ValueError("unexpected parse error")
 
-        row = mgr.run("J-VAL", "WO-2401", bad)
+        result2 = connector2.process(_issue_msg(ref="J-VAL"), transport=bad)
+        self.assertEqual(sleeps2, [])
+        self.assertEqual(result2.status, "Technical Failed")
+        self.assertEqual(connector2.log[-1].status, "Technical Failed")
+
+    def test_08_lost_response_after_remote_post_is_caught_by_repeat_rule(self):
+        connector, sleeps, _ = self._make_connector()
+        remote_posts = {"n": 0}
+
+        def transport_posted_then_timeout(msg):
+            # Simulate remote ERPNext posting on attempt 1, while responses time out.
+            if remote_posts["n"] == 0:
+                connector.ledger.submit(
+                    "issue", msg["id"], msg["work_order"], "ST-20", 120, "Kg", "H-441",
+                    "Raw Material Store", "Forging WIP",
+                )
+            remote_posts["n"] += 1
+            return Result("Technical Failed", "E-TIMEOUT", "", "Response timed out.")
+
+        first = connector.process(_issue_msg(), transport=transport_posted_then_timeout)
+        self.assertEqual(first.status, "Dead")
+        calls_after_first = remote_posts["n"]
+        # Re-sending the same message hits the repeat rule (E-DUP) before calling transport again.
+        second = connector.process(_issue_msg(), transport=transport_posted_then_timeout)
+        self.assertEqual(second.status, "Posted")
+        self.assertEqual(second.code, "E-DUP")
+        self.assertEqual(remote_posts["n"], calls_after_first)
+        self.assertEqual(len(connector.ledger.entries), 1)
+
+    def test_09_terminal_rows_are_not_resent_on_repeated_process_calls(self):
+        connector, sleeps, _ = self._make_connector()
+        calls = {"n": 0}
+
+        def auth_fail(_m):
+            calls["n"] += 1
+            return Result("Technical Failed", "E-AUTH", "", "Bad credentials.")
+
+        connector.process(_issue_msg(), transport=auth_fail)
+        second = connector.process(_issue_msg(), transport=auth_fail)
+        self.assertEqual(calls["n"], 1)
         self.assertEqual(sleeps, [])
-        self.assertEqual(len(row["attempts"]), 1)
-        self.assertEqual(row["status"], "Failed")
-        self.assertEqual(mgr.exception_list, [])
+        self.assertEqual(second.status, "Technical Failed")
 
-    def test_11_and_12_exhausted_failures_become_dead_and_appear_in_exception_list(self):
-        mgr, _, _ = self._make_manager()
-        row = mgr.run("J-DEAD", "WO-2401", lambda: {"status": "Technical Failure", "code": "E-TIMEOUT"})
-        self.assertEqual(row["status"], "Dead")
-        self.assertEqual(len(mgr.exception_list), 1)
-        self.assertEqual(mgr.exception_list[0]["id"], "J-DEAD")
-
-    def test_13_and_14_every_attempt_has_timestamp_and_history_is_append_only(self):
-        mgr, _, _ = self._make_manager()
-        row = mgr.run("J-HIST", "WO-2401", lambda: {"status": "Technical Failure", "code": "E-TIMEOUT"})
-        attempts = row["attempts"]
-        self.assertEqual([a["attempt"] for a in attempts], [1, 2, 3, 4, 5])
-        self.assertTrue(all(a["timestamp"] for a in attempts))
-        self.assertEqual(
-            [a["outcome"] for a in attempts],
-            ["retry_scheduled", "retry_scheduled", "retry_scheduled", "retry_scheduled", "exhausted"],
-        )
-
-    def test_15_and_16_attempt_history_survives_restart_and_polling_does_not_duplicate(self):
+    def test_10_timestamps_match_connector_clock_seconds_format_and_append_only_log(self):
         with tempfile.TemporaryDirectory() as temp:
-            state_path = Path(temp) / "retry_state.json"
-            mgr1, _, _ = self._make_manager(state_path=state_path)
-            mgr1.run("J-PERSIST", "WO-2401", lambda: {"status": "Technical Failure", "code": "E-TIMEOUT"})
+            log_path = Path(temp) / "log.jsonl"
+            c1, _, _ = self._make_connector(log_path=str(log_path))
+            c1.process(
+                _issue_msg(ref="J-TS"),
+                transport=lambda _m: Result("Technical Failed", "E-TIMEOUT", "", "Timeout."),
+            )
+            c1.process(
+                _issue_msg(ref="J-BIZ"),
+                transport=lambda _m: Result("Business Rejected", "E-ITEM", "", "Bad item."),
+            )
+            for row in c1.log:
+                self.assertRegex(row.timestamp, r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$")
 
-            mgr2, sleeps2, _ = self._make_manager(state_path=state_path)
-            self.assertEqual(len(mgr2.exception_list), 1)
-            self.assertEqual(len(mgr2.rows["J-PERSIST"]["attempts"]), 5)
+            # Restart from append-only log.jsonl preserves all 7 rows without loss
+            c2, _, _ = self._make_connector(log_path=str(log_path))
+            self.assertEqual(len(c2.log), 7)
+            self.assertEqual(exception_view.health(c2)["dead"], 1)
 
-            # Polling again must not add duplicate attempts
-            polled = mgr2.run("J-PERSIST", "WO-2401", lambda: {"status": "Posted", "code": "", "document": "STE-9"})
-            self.assertEqual(polled["status"], "Dead")
-            self.assertEqual(len(polled["attempts"]), 5)
-            self.assertEqual(sleeps2, [])
-
-    def test_17_missing_retry_configuration_uses_backward_compatible_defaults(self):
+    def test_11_reloaded_retryable_row_not_marked_dead_without_new_attempt(self):
         with tempfile.TemporaryDirectory() as temp:
-            path = Path(temp) / "config.json"
-            path.write_text(json.dumps({"mode": "test", "live_password": ""}))
-            cfg = load_config(path)
+            log_path = Path(temp) / "log.jsonl"
+            c1, _, _ = self._make_connector(retry_config={"max_retries": 1}, log_path=str(log_path))
+            # Manually record 1 Technical Failed E-TIMEOUT row (non-final)
+            c1._log("J-REL", "WO-2401", "issue", "Technical Failed", "E-TIMEOUT", "")
+            c2, _, _ = self._make_connector(retry_config={"max_retries": 1}, log_path=str(log_path))
+            # Reloading alone must never mark it Dead
+            self.assertEqual(c2.log[-1].status, "Technical Failed")
+            self.assertEqual(exception_view.health(c2)["dead"], 0)
+            # Only after a real failing attempt does it transition to Dead
+            res = c2.process(
+                _issue_msg(ref="J-REL"),
+                transport=lambda _m: Result("Posted", "", "STE-0001", "Recovered."),
+            )
+            self.assertEqual(res.status, "Posted")
+            self.assertEqual(c2.log[-1].status, "Posted")
+
+    def test_12_strict_retry_config_validation(self):
+        cfg = load_config()
         self.assertEqual(cfg["retry"], DEFAULT_RETRY)
 
-    def test_18_invalid_retry_configuration_is_rejected(self):
-        invalid_blocks = [
-            "bad",
-            {"max_attempts": 0},
-            {"max_attempts": True},
-            {"initial_delay_seconds": 0},
-            {"backoff_multiplier": 1.0},
+        invalid_cases = [
+            ("bad", "retry"),
+            ({"max_attemps": 1}, "unknown"),
+            ({"max_retries": 0}, "max_retries"),
+            ({"max_retries": -1}, "max_retries"),
+            ({"max_retries": 11}, "max_retries"),
+            ({"max_retries": True}, "max_retries"),
+            ({"max_retries": "5"}, "max_retries"),
+            ({"initial_delay_seconds": 0}, "initial_delay_seconds"),
+            ({"initial_delay_seconds": -1}, "initial_delay_seconds"),
+            ({"initial_delay_seconds": 301}, "initial_delay_seconds"),
+            ({"initial_delay_seconds": float("nan")}, "initial_delay_seconds"),
+            ({"initial_delay_seconds": float("inf")}, "initial_delay_seconds"),
+            ({"initial_delay_seconds": float("-inf")}, "initial_delay_seconds"),
+            ({"initial_delay_seconds": True}, "initial_delay_seconds"),
+            ({"initial_delay_seconds": "1"}, "initial_delay_seconds"),
+            ({"backoff_multiplier": 1.0}, "backoff_multiplier"),
+            ({"backoff_multiplier": float("nan")}, "backoff_multiplier"),
+            ({"backoff_multiplier": float("inf")}, "backoff_multiplier"),
+            ({"backoff_multiplier": True}, "backoff_multiplier"),
         ]
-        for block in invalid_blocks:
-            with tempfile.TemporaryDirectory() as temp:
-                path = Path(temp) / "config.json"
-                path.write_text(json.dumps({"mode": "test", "live_password": "", "retry": block}))
-                with self.assertRaises(ConfigError):
-                    load_config(path)
+        for block, expected_field in invalid_cases:
+            with self.subTest(block=block):
+                with tempfile.TemporaryDirectory() as temp:
+                    path = Path(temp) / "config.json"
+                    path.write_text(json.dumps({"mode": "test", "live_password": "", "retry": block}))
+                    with self.assertRaises(ConfigError) as caught:
+                        load_config(path)
+                    self.assertIn(expected_field, str(caught.exception))
 
 
 if __name__ == "__main__":
