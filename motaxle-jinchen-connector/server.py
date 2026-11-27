@@ -10,6 +10,7 @@ import os
 import shutil
 import sys
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -21,6 +22,7 @@ from connector.poc import ConfigError, Connector, LOG_FILE_ERROR_MESSAGE
 import connector.inbox as inbox_folders
 from connector import exceptions as exception_view
 from connector.inbox import copy_samples, list_inbox, load_config, read_all
+from connector.notifications import NotificationStore
 
 HOST = "127.0.0.1"
 PORT = 8765
@@ -36,9 +38,10 @@ LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "inbox", "lo
 
 
 class Desk:
-    def __init__(self, weight=None, log_path=None, reload_config=None):
+    def __init__(self, weight=None, log_path=None, reload_config=None, notifications_config=None):
         self._fixed_weight = weight
         self._reload_config = (weight is None) if reload_config is None else bool(reload_config)
+        self._notifications_config = notifications_config
         self.weight = weight
         self.log_path = log_path
         self.connector = Connector(weight=self.weight, log_path=self.log_path)
@@ -58,6 +61,38 @@ class Desk:
             getattr(row, "kind", "") == "release" and getattr(row, "status", "") == "Sent"
             for row in self.connector.log
         )
+        self._eval_lock = threading.Lock()
+        self._last_notification_eval = 0.0
+        self._eval_interval_seconds = 60.0
+        self.notifications = self._build_notifications_store()
+        self._evaluate_notifications()
+
+    def _build_notifications_store(self):
+        if self.log_path:
+            base = Path(self.log_path).parent
+            return NotificationStore(
+                mailbox_path=base / "notifications.jsonl",
+                state_path=base / "notifications_state.json",
+                config=self._notifications_config,
+            )
+        return NotificationStore(config=self._notifications_config)
+
+    def _evaluate_notifications(self, min_interval=0.0):
+        with self._eval_lock:
+            if min_interval > 0 and (time.monotonic() - self._last_notification_eval) < min_interval:
+                return
+            try:
+                self.notifications.evaluate(self.connector.log)
+            except (OSError, ValueError, TypeError) as exc:
+                msg = f"Notification evaluation failed: {exc}"
+                if msg not in self.notifications.warnings:
+                    self.notifications.warnings.append(msg)
+            else:
+                self.notifications.warnings = [
+                    w for w in self.notifications.warnings if not w.startswith("Notification evaluation failed: ")
+                ]
+            finally:
+                self._last_notification_eval = time.monotonic()
 
     def _take_log_error(self, text):
         if getattr(self.connector, "log_file_error", False):
@@ -69,7 +104,9 @@ class Desk:
         config_error = None
         if self._reload_config:
             try:
-                self.weight = load_config()["weight"]
+                loaded_cfg = load_config()
+                self.weight = loaded_cfg["weight"]
+                self._notifications_config = loaded_cfg.get("notifications")
             except (ConfigError, OSError) as exc:
                 config_error = str(exc)
         else:
@@ -132,6 +169,16 @@ class Desk:
         self.switch_a = False
         self.switch_b = False
         self.released = False
+        if cleared and self.log_path:
+            base = Path(self.log_path).parent
+            for fname in ("notifications.jsonl", "notifications_state.json"):
+                target = base / fname
+                if target.exists():
+                    try:
+                        target.unlink()
+                    except OSError:
+                        pass
+        self.notifications = self._build_notifications_store()
         if config_error is not None:
             msg = f"Job reset. config.json was not loaded: {config_error}"
             if not cleared:
@@ -180,6 +227,7 @@ class Desk:
             self.attempts.append(row)
             last_result = row
 
+        self._evaluate_notifications()
         payload = self.payload(last_result)
         inbox_msg = (
             f"Read {len(pairs)} inbox file(s)."
@@ -211,6 +259,7 @@ class Desk:
                 "message": msg,
             }
             self.attempts.append(row)
+            self._evaluate_notifications()
             return row
         # Work on a copy. For a catalog button, message is ACTIONS[...]["message"],
         # a module-level dictionary shared by every click and every browser tab.
@@ -243,6 +292,7 @@ class Desk:
             "message": text,
         }
         self.attempts.append(row)
+        self._evaluate_notifications()
         return row
 
     def set_switch(self, name, on):
@@ -297,6 +347,7 @@ class Desk:
         )
         row["message"] = self._take_log_error(row["message"])
         self.attempts.append(row)
+        self._evaluate_notifications()
         return row
 
     def replay(self, row, role):
@@ -312,9 +363,11 @@ class Desk:
             "message": self._take_log_error(answer["message"]),
         }
         self.attempts.append(result)
+        self._evaluate_notifications()
         return result
 
     def payload(self, result=None):
+        self._evaluate_notifications(min_interval=self._eval_interval_seconds)
         connector = self.connector
         kg = connector.kg()
         pieces = connector.pieces()
@@ -392,6 +445,9 @@ class Desk:
             "inbox_files": [item.name for item in list_inbox()],
             "exceptions": exception_view.exception_list(connector),
             "health": exception_view.safe_health(connector),
+            "notifications": list(self.notifications.notices[-100:]),
+            "notifications_count": len(self.notifications.notices),
+            "notifications_warning": "; ".join(self.notifications.warnings),
         }
 
 
@@ -908,7 +964,21 @@ function paintExceptions() {
             '<button class="send" type="button" data-replay="' + row.row + '">Replay</button></td></tr>';
         }).join("") + "</table>"
       : '<p class="muted">No failed messages.</p>') +
-    '<pre id="payload-box" class="muted"></pre></section>';
+    '<pre id="payload-box" class="muted"></pre></section>' +
+    '<section class="panel" style="margin-top:12px"><h2>Notifications</h2>' +
+    (state.notifications_warning ? '<p class="muted">' + esc(state.notifications_warning) + "</p>" : "") +
+    ((state.notifications_count || 0) > (state.notifications || []).length
+      ? '<p class="muted">Showing latest ' + esc((state.notifications || []).length) + " of " + esc(state.notifications_count) + " notifications.</p>"
+      : "") +
+    ((state.notifications || []).length
+      ? "<table><tr><th>Recipient</th><th>Type</th><th>Code</th><th>Row</th><th>Work order</th><th>Time</th><th>Message</th></tr>" +
+        (state.notifications || []).map(function (n) {
+          return "<tr><td>" + esc(n.recipient) + "</td><td>" + esc(n.type) + "</td><td>" + esc(n.code) +
+            "</td><td>" + esc(n.row_id || "-") + "</td><td>" + esc(n.work_order || "-") +
+            "</td><td>" + esc(n.timestamp) + "</td><td>" + esc(n.message) + "</td></tr>";
+        }).join("") + "</table>"
+      : '<p class="muted">No notifications.</p>') +
+    "</section>";
   document.getElementById("payload-box").textContent = payloadText;
   document.getElementById("replay-role").onchange = function (event) { replayRole = event.target.value; };
 }
@@ -1251,7 +1321,12 @@ def main():
         print(str(exc), flush=True)
         print("The desk did not start.", flush=True)
         return 1
-    DESK = Desk(weight=config["weight"], log_path=LOG_PATH, reload_config=True)
+    DESK = Desk(
+        weight=config["weight"],
+        log_path=LOG_PATH,
+        reload_config=True,
+        notifications_config=config.get("notifications"),
+    )
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     print("Open http://%s:%d" % (HOST, PORT), flush=True)
     print("Ctrl+C stops it.", flush=True)

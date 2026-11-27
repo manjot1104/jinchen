@@ -58,3 +58,53 @@ On the Work order screen:
 ## Clean up after a run
 
 `inbox/in/`, `inbox/done/` and `inbox/results/` are local. Do not commit them. To start the inbox fresh, empty those three folders by hand; Copy samples only copies when `inbox/in/` holds no JSON file.
+
+## Notification rules
+
+The connector can generate notifications for unresolved failures and specific
+order events. Notification settings are optional and use these defaults:
+
+| Setting | Default |
+|---|---:|
+| Old failure threshold | 4 working hours |
+| Working hours | 09:00–17:00 |
+| Working days | Monday–Friday |
+| E-STOCK threshold | 3 events |
+
+### Notification triggers
+
+- **Old unresolved failure:** Notify Support and Stores Manager after the
+  configured number of working hours for failure statuses only
+  (`Business Rejected`, `Technical Failed`, `Dead`). `Posted` and `Sent` are
+  successful statuses, and `Queued` / `Replayed` do not generate failure
+  notifications.
+- **E-AMEND:** Notify Planner once for each eligible failure row.
+- **Repeated E-STOCK:** Notify Stores when the configured number of distinct
+  E-STOCK business operations (`event_id` if provided, or distinct non-replay
+  attempts at different log positions; retries/replays and polling of the same
+  attempt do not inflate the count) occurs for the same work order on the same
+  date.
+- **Posted suppression:** Rows with status `Posted` do not generate
+  notifications, and a matching later `Posted` row (later in log order)
+  suppresses old-failure, E-AMEND, and E-STOCK notifications for that earlier
+  failure. An earlier `Posted` row does not suppress a later genuine failure.
+
+### Delivery and safety
+
+- Notifications contain safe metadata only, with secret-like tokens in
+  identifiers masked. Raw payload text and secrets are never included.
+- Notification keys include record kind/operation (falling back to `attempt_id`
+  when ID is empty) to prevent duplicate or colliding alerts.
+- Sent notification state (`inbox/notifications_state.json`) and append-only
+  JSONL mailbox (`inbox/notifications.jsonl`) persist across restarts under the
+  gitignored `inbox/` directory, and are surfaced on the Desk Exceptions view.
+- A notification is marked as sent only after mailbox delivery succeeds, and
+  mailbox entries are also restored into `sent_keys` on restart.
+
+### Configuration
+
+The optional `notifications` configuration block supports:
+`old_failure_working_hours`, `work_start_hour`, `work_end_hour`,
+`working_weekdays`, and `estock_threshold`.
+
+Invalid notification settings are rejected during configuration validation.

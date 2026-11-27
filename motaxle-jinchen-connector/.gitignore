@@ -7,6 +7,8 @@ inbox/results/*
 inbox/log.jsonl
 inbox/.ste_counter
 inbox/ledger.jsonl
+inbox/notifications.jsonl
+inbox/notifications_state.json
 inbox/archive/
 log.jsonl
 .ste_counter
