@@ -80,10 +80,14 @@ order events. Notification settings are optional and use these defaults:
   notifications.
 - **E-AMEND:** Notify Planner once for each eligible failure row.
 - **Repeated E-STOCK:** Notify Stores when the configured number of distinct
-  E-STOCK events occurs for the same work order on the same date.
+  E-STOCK business operations (`event_id` if provided, or distinct non-replay
+  attempts at different log positions; retries/replays and polling of the same
+  attempt do not inflate the count) occurs for the same work order on the same
+  date.
 - **Posted suppression:** Rows with status `Posted` do not generate
-  notifications, and a matching later `Posted` row suppresses old-failure,
-  E-AMEND, and E-STOCK notifications for that record.
+  notifications, and a matching later `Posted` row (later in log order)
+  suppresses old-failure, E-AMEND, and E-STOCK notifications for that earlier
+  failure. An earlier `Posted` row does not suppress a later genuine failure.
 
 ### Delivery and safety
 

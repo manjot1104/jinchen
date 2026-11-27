@@ -380,6 +380,186 @@ class NotificationRulesTests(unittest.TestCase):
             with self.assertRaises(ConfigError):
                 load_config(bad)
 
+    def test_malformed_timestamps_do_not_crash_evaluate_or_desk_startup(self):
+        import server
+        store = NotificationStore()
+        rows = [
+            self._row(ref="V-1", code="E-AMEND", timestamp="2026-11-20T09:00:00"),
+            self._row(ref="BAD-1", status="Dead", code="E-TIMEOUT", timestamp="20/11/2026 10:00"),
+            self._row(ref="BAD-2", status="Dead", code="E-TIMEOUT", timestamp=""),
+            self._row(ref="BAD-3", status="Dead", code="E-TIMEOUT", timestamp=None),
+            self._row(ref="BAD-4", status="Dead", code="E-TIMEOUT", timestamp=12345),
+            self._row(ref="V-2", code="E-AMEND", timestamp="2026-11-20T09:05:00"),
+        ]
+        emitted = store.evaluate(rows, now="2026-11-20T10:00:00")
+        self.assertEqual([n["row_id"] for n in emitted], ["V-1", "V-2"])
+
+        with tempfile.TemporaryDirectory() as temp:
+            log_path = Path(temp) / "log.jsonl"
+            log_path.write_text(
+                json.dumps({
+                    "ref": "J-BAD-TS", "work_order": "WO-2401", "kind": "issue",
+                    "status": "Dead", "code": "E-TIMEOUT", "document": "",
+                    "timestamp": "20/11/2026 10:00",
+                }) + "\n",
+                encoding="utf-8",
+            )
+            desk = server.Desk(log_path=str(log_path))
+            desk.run("bad-item")
+            desk.reset()
+            self.assertEqual(desk.payload()["notifications"], [])
+
+            with mock.patch.object(desk.notifications, "evaluate", side_effect=ValueError("bad clock")):
+                desk._evaluate_notifications()
+            self.assertIn("bad clock", desk.payload()["notifications_warning"])
+
+    def test_performance_single_state_save_sent_key_skip_and_o1_working_hours(self):
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp) / "state.json"
+            mailbox = Path(temp) / "mailbox.jsonl"
+            store = NotificationStore(mailbox_path=mailbox, state_path=state)
+            rows = [
+                self._row(ref=f"P-{i}", code="E-AMEND", timestamp="2026-11-20T09:00:00")
+                for i in range(5)
+            ]
+            with mock.patch.object(store, "_save_state", wraps=store._save_state) as save_spy:
+                emitted = store.evaluate(rows, now="2026-11-20T14:00:00")
+                self.assertEqual(len(emitted), 15)
+                self.assertEqual(save_spy.call_count, 1)
+
+            with mock.patch("connector.notifications._working_hours_between_validated") as wh_spy:
+                self.assertEqual(store.evaluate(rows, now="2026-11-20T15:00:00"), [])
+                self.assertEqual(wh_spy.call_count, 0)
+
+        # 52 weeks (364 days) of Mon-Fri 09:00-17:00 = 52 * 40 = 2080.0 hours
+        self.assertEqual(
+            working_hours_between("2025-11-20T09:00:00", "2026-11-19T09:00:00"),
+            2080.0,
+        )
+
+    def test_periodic_evaluation_from_payload_without_user_action(self):
+        import server
+        import threading
+        with tempfile.TemporaryDirectory() as temp:
+            desk = server.Desk(
+                log_path=str(Path(temp) / "log.jsonl"),
+                notifications_config={"old_failure_working_hours": 1.0, "work_start_hour": 0, "work_end_hour": 24, "working_weekdays": [0, 1, 2, 3, 4, 5, 6]},
+            )
+            desk.run("bad-item")
+            desk.connector.log[-1].timestamp = "2026-11-20T09:00:00"
+
+            # Within 60s interval, payload() does not re-evaluate
+            self.assertEqual(desk.payload()["notifications"], [])
+
+            # Advance past interval and invoke payload() concurrently
+            desk._last_notification_eval -= 61.0
+            results = []
+            threads = [
+                threading.Thread(target=lambda: results.append(desk.payload()["notifications"]))
+                for _ in range(4)
+            ]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+            self.assertEqual(len(desk.notifications.notices), 2)
+            self.assertTrue(all(len(r) == 2 for r in results))
+
+    def test_mailbox_and_state_write_failures_surface_once_and_recover(self):
+        import server
+        with tempfile.TemporaryDirectory() as temp:
+            desk = server.Desk(log_path=str(Path(temp) / "log.jsonl"))
+            desk.run("bad-item")
+            desk.connector.log[-1].timestamp = "2026-11-20T09:00:00"
+            with mock.patch.object(desk.notifications, "_append_mailbox", side_effect=OSError("disk full")):
+                desk._evaluate_notifications()
+                desk._evaluate_notifications()
+            warnings = [w for w in desk.notifications.warnings if "disk full" in w]
+            self.assertEqual(len(warnings), 1)
+            self.assertIn("disk full", desk.payload()["notifications_warning"])
+
+            # Once disk write succeeds, notices are emitted and the transient error clears
+            desk._evaluate_notifications()
+            self.assertEqual(len(desk.payload()["notifications"]), 2)
+            self.assertEqual(desk.payload()["notifications_warning"], "")
+
+    def test_estock_state_shape_validation_and_pipe_in_work_order(self):
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp) / "state.json"
+            state.write_text(json.dumps({
+                "sent_keys": [],
+                "estock_events": {
+                    "bad": ["x"],
+                    "WO|2401|2026-11-20": ["e1", 123, {"bad": True}],
+                },
+            }), encoding="utf-8")
+            store = NotificationStore(state_path=state)
+            self.assertIn(("WO|2401", "2026-11-20"), store.estock_events)
+            self.assertEqual(store.estock_events[("WO|2401", "2026-11-20")], ["e1", "123"])
+            self.assertTrue(any("bad" in w for w in store.warnings))
+
+            # Subsequent evaluation and save_state must not crash
+            emitted = store.evaluate(
+                [self._row(ref="J-PIPE", work_order="WO|2401", code="E-STOCK", timestamp="2026-11-20T09:30:00")],
+                now="2026-11-20T10:00:00",
+            )
+            self.assertEqual(len(emitted), 1)
+            self.assertEqual(emitted[0]["type"], "e_stock_repeated")
+
+    def test_posted_suppression_respects_log_order(self):
+        store = NotificationStore()
+        # Posted before failure must NOT suppress the later failure
+        rows = [
+            self._row(ref="ORD-1", status="Posted", code="", timestamp="2026-11-20T09:00:00"),
+            self._row(ref="ORD-1", status="Business Rejected", code="E-AMEND", timestamp="2026-11-20T10:00:00"),
+        ]
+        emitted = store.evaluate(rows, now="2026-11-20T10:05:00")
+        self.assertEqual(len(emitted), 1)
+
+        # Failure -> Posted -> new failure suppresses only the first failure
+        store2 = NotificationStore()
+        rows2 = [
+            self._row(ref="ORD-2", status="Business Rejected", code="E-AMEND", timestamp="2026-11-20T09:00:00"),
+            self._row(ref="ORD-2", status="Posted", code="", timestamp="2026-11-20T09:05:00"),
+            self._row(ref="ORD-2", status="Business Rejected", code="E-AMEND", timestamp="2026-11-20T10:00:00"),
+        ]
+        emitted2 = store2.evaluate(rows2, now="2026-11-20T10:05:00")
+        self.assertEqual(len(emitted2), 1)
+        self.assertEqual(emitted2[0]["timestamp"], "2026-11-20T10:00:00")
+
+    def test_estock_counts_distinct_operations_with_same_repeat_key_but_not_replays(self):
+        store = NotificationStore()
+        rows = [
+            self._row(ref="J-BIG", code="E-STOCK", timestamp="2026-11-20T09:00:00", replay_of=-1),
+            self._row(ref="J-BIG", code="E-STOCK", timestamp="2026-11-20T09:01:00", replay_of=-1),
+            # Replay of row 0 must not count as a 3rd distinct operation
+            self._row(ref="J-BIG", code="E-STOCK", timestamp="2026-11-20T09:02:00", replay_of=0),
+        ]
+        self.assertEqual(store.evaluate(rows, now="2026-11-20T09:05:00"), [])
+        rows.append(self._row(ref="J-BIG", code="E-STOCK", timestamp="2026-11-20T09:03:00", replay_of=-1))
+        emitted = store.evaluate(rows, now="2026-11-20T09:05:00")
+        self.assertEqual(len(emitted), 1)
+        self.assertEqual(emitted[0]["type"], "e_stock_repeated")
+
+    def test_payload_limits_notifications_to_newest_100_and_includes_total_count(self):
+        import server
+        with tempfile.TemporaryDirectory() as temp:
+            desk = server.Desk(log_path=str(Path(temp) / "log.jsonl"))
+            rows = [
+                self._row(ref=f"N-{i}", code="E-AMEND", timestamp="2026-11-20T09:00:00")
+                for i in range(120)
+            ]
+            desk.notifications.evaluate(rows, now="2026-11-20T09:05:00")
+            payload = desk.payload()
+            self.assertEqual(payload["notifications_count"], 120)
+            self.assertEqual(len(payload["notifications"]), 100)
+            self.assertEqual(payload["notifications"][0]["row_id"], "N-20")
+            self.assertEqual(payload["notifications"][-1]["row_id"], "N-119")
+            self.assertEqual(len(desk.notifications.notices), 120)
+            desk.reset()
+            self.assertEqual(desk.payload()["notifications_count"], 0)
+            self.assertEqual(desk.payload()["notifications"], [])
+
 
 if __name__ == "__main__":
     unittest.main()

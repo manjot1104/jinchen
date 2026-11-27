@@ -116,10 +116,70 @@ def parse_timestamp(value):
         return _to_local_naive(value)
     if isinstance(value, str):
         text = value.strip()
+        if not text:
+            raise ValueError("Timestamp string is empty.")
         if text.endswith("Z"):
             text = text[:-1] + "+00:00"
         return _to_local_naive(datetime.fromisoformat(text))
     raise ValueError("Timestamp must be a datetime or ISO-8601 string.")
+
+
+def _safe_parse_timestamp(value):
+    """Parse a timestamp tolerantly; return None for malformed or missing values."""
+    try:
+        return parse_timestamp(value)
+    except (ValueError, TypeError):
+        return None
+
+
+def _day_overlap_seconds(day_date, start_dt, end_dt, start_hour, end_hour):
+    day_start = datetime.combine(day_date, time(start_hour, 0))
+    if end_hour == 24:
+        day_end = datetime.combine(day_date + timedelta(days=1), time(0, 0))
+    else:
+        day_end = datetime.combine(day_date, time(end_hour, 0))
+    overlap_start = max(start_dt, day_start)
+    overlap_end = min(end_dt, day_end)
+    if overlap_end > overlap_start:
+        return (overlap_end - overlap_start).total_seconds()
+    return 0.0
+
+
+def _working_hours_between_validated(start_dt, end_dt, cfg):
+    """Calculate working hours in O(1) by counting whole weeks plus boundary days."""
+    if end_dt <= start_dt:
+        return 0.0
+
+    work_days = set(cfg["working_weekdays"])
+    start_hour = cfg["work_start_hour"]
+    end_hour = cfg["work_end_hour"]
+    hours_per_day = end_hour - start_hour
+
+    first_day = start_dt.date()
+    last_day = end_dt.date()
+
+    if first_day == last_day:
+        if first_day.weekday() not in work_days:
+            return 0.0
+        return _day_overlap_seconds(first_day, start_dt, end_dt, start_hour, end_hour) / 3600.0
+
+    total_seconds = 0.0
+    if first_day.weekday() in work_days:
+        total_seconds += _day_overlap_seconds(first_day, start_dt, end_dt, start_hour, end_hour)
+    if last_day.weekday() in work_days:
+        total_seconds += _day_overlap_seconds(last_day, start_dt, end_dt, start_hour, end_hour)
+
+    mid_start = first_day + timedelta(days=1)
+    mid_end = last_day - timedelta(days=1)
+    if mid_end >= mid_start:
+        mid_days = (mid_end - mid_start).days + 1
+        full_weeks, rem_days = divmod(mid_days, 7)
+        total_seconds += full_weeks * len(work_days) * hours_per_day * 3600.0
+        for offset in range(rem_days):
+            if (mid_start + timedelta(days=offset)).weekday() in work_days:
+                total_seconds += hours_per_day * 3600.0
+
+    return total_seconds / 3600.0
 
 
 def working_hours_between(start, end, config=None):
@@ -127,32 +187,7 @@ def working_hours_between(start, end, config=None):
     cfg = validate_notifications_config(config)
     start_dt = parse_timestamp(start)
     end_dt = parse_timestamp(end)
-    if end_dt <= start_dt:
-        return 0.0
-
-    work_days = set(cfg["working_weekdays"])
-    start_hour = cfg["work_start_hour"]
-    end_hour = cfg["work_end_hour"]
-
-    total_seconds = 0.0
-    current_day = start_dt.date()
-    last_day = end_dt.date()
-
-    while current_day <= last_day:
-        if current_day.weekday() in work_days:
-            day_start = datetime.combine(current_day, time(start_hour, 0))
-            if end_hour == 24:
-                day_end = datetime.combine(current_day + timedelta(days=1), time(0, 0))
-            else:
-                day_end = datetime.combine(current_day, time(end_hour, 0))
-
-            overlap_start = max(start_dt, day_start)
-            overlap_end = min(end_dt, day_end)
-            if overlap_end > overlap_start:
-                total_seconds += (overlap_end - overlap_start).total_seconds()
-        current_day += timedelta(days=1)
-
-    return total_seconds / 3600.0
+    return _working_hours_between_validated(start_dt, end_dt, cfg)
 
 
 def _atomic_write_text(path, content):
@@ -209,6 +244,17 @@ def _row_identity(row, ts_iso=""):
     return f"ts:{ts_iso}|{wo}|{kind}"
 
 
+def _estock_event_key(row, row_key, ts_iso, idx):
+    """Identify a distinct E-STOCK business operation; return None for replays."""
+    explicit_id = _row_field(row, "event_id", "")
+    if explicit_id:
+        return str(explicit_id)
+    replay_of = _row_field(row, "replay_of", -1)
+    if isinstance(replay_of, int) and replay_of >= 0:
+        return None
+    return f"op:{row_key}|{ts_iso}|{idx}"
+
+
 class NotificationStore:
     """Evaluate connector rows against notification rules with atomic persistence."""
 
@@ -228,11 +274,39 @@ class NotificationStore:
                 data = json.loads(self.state_path.read_text(encoding="utf-8"))
                 if not isinstance(data, dict):
                     raise ValueError("State must be a JSON object.")
-                self.sent_keys = set(data.get("sent_keys", []))
-                self.estock_events = {
-                    tuple(k.split("|", 1)): list(v)
-                    for k, v in data.get("estock_events", {}).items()
-                }
+
+                raw_sent = data.get("sent_keys", [])
+                if not isinstance(raw_sent, list):
+                    raise ValueError("sent_keys must be a list.")
+                self.sent_keys = {str(k) for k in raw_sent if isinstance(k, str) and k}
+
+                raw_estock = data.get("estock_events", {})
+                if not isinstance(raw_estock, dict):
+                    raise ValueError("estock_events must be a JSON object.")
+                parsed_estock = {}
+                for raw_key, raw_events in raw_estock.items():
+                    if not isinstance(raw_key, str) or "|" not in raw_key:
+                        self.warnings.append(
+                            f"Skipped malformed E-STOCK state key in {self.state_path.name}: {raw_key!r}"
+                        )
+                        continue
+                    wo, day = raw_key.rsplit("|", 1)
+                    if not wo or not day or not isinstance(raw_events, list):
+                        self.warnings.append(
+                            f"Skipped malformed E-STOCK state entry in {self.state_path.name}: {raw_key!r}"
+                        )
+                        continue
+                    valid_events = [
+                        str(e)
+                        for e in raw_events
+                        if isinstance(e, (str, int, float)) and not isinstance(e, bool) and str(e)
+                    ]
+                    if len(valid_events) != len(raw_events):
+                        self.warnings.append(
+                            f"Skipped malformed E-STOCK event value in {self.state_path.name} for {raw_key!r}"
+                        )
+                    parsed_estock[(wo, day)] = valid_events
+                self.estock_events = parsed_estock
             except (json.JSONDecodeError, UnicodeDecodeError, ValueError, TypeError, AttributeError, OSError) as exc:
                 self.sent_keys = set()
                 self.estock_events = {}
@@ -294,7 +368,6 @@ class NotificationStore:
         self._append_mailbox(notice)
         self.sent_keys.add(dedup_key)
         self.notices.append(notice)
-        self._save_state()
         return notice
 
     def evaluate(self, rows, now=None):
@@ -303,91 +376,107 @@ class NotificationStore:
             return []
         current_time = parse_timestamp(now) if now is not None else datetime.now()
         emitted = []
+        state_dirty = False
 
-        # Track rows resolved by a later Posted attempt using the row's unique identity.
-        posted_keys = set()
-        for row in rows:
+        # Track the last Posted log index per identity so only later Posted rows suppress failures.
+        last_posted_idx = {}
+        for idx, row in enumerate(rows):
             status = str(_row_field(row, "status", "")).strip()
             if status == "Posted":
-                posted_keys.add(_row_identity(row))
+                last_posted_idx[_row_identity(row)] = idx
 
-        for row in rows:
-            status = str(_row_field(row, "status", "")).strip()
-            if status not in FAILURE_STATUSES:
-                continue
+        try:
+            for idx, row in enumerate(rows):
+                status = str(_row_field(row, "status", "")).strip()
+                if status not in FAILURE_STATUSES:
+                    continue
 
-            ts_raw = _row_field(row, "timestamp", "")
-            if not ts_raw:
-                continue
-            row_dt = parse_timestamp(ts_raw)
-            ts_iso = row_dt.isoformat()
+                ts_raw = _row_field(row, "timestamp", "")
+                row_dt = _safe_parse_timestamp(ts_raw)
+                if row_dt is None:
+                    continue
+                ts_iso = row_dt.isoformat()
 
-            row_key = _row_identity(row, ts_iso=ts_iso)
-            if row_key in posted_keys:
-                continue
+                row_key = _row_identity(row, ts_iso=ts_iso)
+                if last_posted_idx.get(row_key, -1) > idx:
+                    continue
 
-            ref = _mask_text(_row_field(row, "ref", "") or _row_field(row, "id", ""))
-            wo = _mask_text(_row_field(row, "work_order", ""))
-            code = str(_row_field(row, "code", "")).strip()
+                ref = _mask_text(_row_field(row, "ref", "") or _row_field(row, "id", ""))
+                wo = _mask_text(_row_field(row, "work_order", ""))
+                code = str(_row_field(row, "code", "")).strip()
 
-            # AC-2: E-AMEND notifies Planner once per row.
-            if code == "E-AMEND":
-                key = f"e_amend|{row_key}|Planner"
-                notice = {
-                    "notification_id": key,
-                    "type": "e_amend",
-                    "recipient": "Planner",
-                    "code": "E-AMEND",
-                    "row_id": ref,
-                    "work_order": wo,
-                    "timestamp": ts_iso,
-                    "message": "Amendment failure requires planner review.",
-                }
-                sent = self._emit(key, notice)
-                if sent is not None:
-                    emitted.append(sent)
+                # AC-2: E-AMEND notifies Planner once per row.
+                if code == "E-AMEND":
+                    key = f"e_amend|{row_key}|Planner"
+                    if key not in self.sent_keys:
+                        notice = {
+                            "notification_id": key,
+                            "type": "e_amend",
+                            "recipient": "Planner",
+                            "code": "E-AMEND",
+                            "row_id": ref,
+                            "work_order": wo,
+                            "timestamp": ts_iso,
+                            "message": "Amendment failure requires planner review.",
+                        }
+                        sent = self._emit(key, notice)
+                        if sent is not None:
+                            emitted.append(sent)
+                            state_dirty = True
 
-            # AC-3: 3 distinct E-STOCK failures per (work_order, business_date) notify Stores.
-            if code == "E-STOCK" and wo:
-                day = row_dt.date().isoformat()
-                event_id = str(_row_field(row, "event_id", "") or row_key or ts_iso)
-                bucket = self.estock_events.setdefault((wo, day), [])
-                if event_id not in bucket:
-                    bucket.append(event_id)
-                    self._save_state()
-                if len(bucket) >= self.config["estock_threshold"]:
-                    key = f"e_stock_repeated|{wo}|{day}|Stores"
-                    notice = {
-                        "notification_id": key,
-                        "type": "e_stock_repeated",
-                        "recipient": "Stores",
-                        "code": "E-STOCK",
-                        "row_id": ref,
-                        "work_order": wo,
-                        "timestamp": ts_iso,
-                        "message": "Repeated short-stock failures reached daily order threshold.",
-                    }
-                    sent = self._emit(key, notice)
-                    if sent is not None:
-                        emitted.append(sent)
+                # AC-3: Repeated E-STOCK failures per (work_order, business_date) notify Stores.
+                if code == "E-STOCK" and wo:
+                    day = row_dt.date().isoformat()
+                    event_id = _estock_event_key(row, row_key, ts_iso, idx)
+                    bucket = self.estock_events.setdefault((wo, day), [])
+                    if event_id is not None and event_id not in bucket:
+                        bucket.append(event_id)
+                        state_dirty = True
+                    if len(bucket) >= self.config["estock_threshold"]:
+                        key = f"e_stock_repeated|{wo}|{day}|Stores"
+                        if key not in self.sent_keys:
+                            notice = {
+                                "notification_id": key,
+                                "type": "e_stock_repeated",
+                                "recipient": "Stores",
+                                "code": "E-STOCK",
+                                "row_id": ref,
+                                "work_order": wo,
+                                "timestamp": ts_iso,
+                                "message": "Repeated short-stock failures reached daily order threshold.",
+                            }
+                            sent = self._emit(key, notice)
+                            if sent is not None:
+                                emitted.append(sent)
+                                state_dirty = True
 
-            # AC-1: Unresolved failed row older than configured working hours notifies Support and Stores Manager.
-            elapsed = working_hours_between(row_dt, current_time, self.config)
-            if elapsed >= self.config["old_failure_working_hours"]:
-                for recipient in ("Support", "Stores Manager"):
-                    key = f"old_failure|{row_key}|{recipient}"
-                    notice = {
-                        "notification_id": key,
-                        "type": "old_failure",
-                        "recipient": recipient,
-                        "code": code,
-                        "row_id": ref,
-                        "work_order": wo,
-                        "timestamp": ts_iso,
-                        "message": "Failed message exceeded working-hour threshold.",
-                    }
-                    sent = self._emit(key, notice)
-                    if sent is not None:
-                        emitted.append(sent)
+                # AC-1: Unresolved failed row older than working hours notifies Support & Stores Manager.
+                old_keys = (
+                    f"old_failure|{row_key}|Support",
+                    f"old_failure|{row_key}|Stores Manager",
+                )
+                if not (old_keys[0] in self.sent_keys and old_keys[1] in self.sent_keys):
+                    elapsed = _working_hours_between_validated(row_dt, current_time, self.config)
+                    if elapsed >= self.config["old_failure_working_hours"]:
+                        for recipient, key in zip(("Support", "Stores Manager"), old_keys):
+                            if key in self.sent_keys:
+                                continue
+                            notice = {
+                                "notification_id": key,
+                                "type": "old_failure",
+                                "recipient": recipient,
+                                "code": code,
+                                "row_id": ref,
+                                "work_order": wo,
+                                "timestamp": ts_iso,
+                                "message": "Failed message exceeded working-hour threshold.",
+                            }
+                            sent = self._emit(key, notice)
+                            if sent is not None:
+                                emitted.append(sent)
+                                state_dirty = True
+        finally:
+            if state_dirty:
+                self._save_state()
 
         return emitted

@@ -10,6 +10,7 @@ import os
 import shutil
 import sys
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -60,6 +61,9 @@ class Desk:
             getattr(row, "kind", "") == "release" and getattr(row, "status", "") == "Sent"
             for row in self.connector.log
         )
+        self._eval_lock = threading.Lock()
+        self._last_notification_eval = 0.0
+        self._eval_interval_seconds = 60.0
         self.notifications = self._build_notifications_store()
         self._evaluate_notifications()
 
@@ -73,11 +77,22 @@ class Desk:
             )
         return NotificationStore(config=self._notifications_config)
 
-    def _evaluate_notifications(self):
-        try:
-            self.notifications.evaluate(self.connector.log)
-        except OSError:
-            pass
+    def _evaluate_notifications(self, min_interval=0.0):
+        with self._eval_lock:
+            if min_interval > 0 and (time.monotonic() - self._last_notification_eval) < min_interval:
+                return
+            try:
+                self.notifications.evaluate(self.connector.log)
+            except (OSError, ValueError, TypeError) as exc:
+                msg = f"Notification evaluation failed: {exc}"
+                if msg not in self.notifications.warnings:
+                    self.notifications.warnings.append(msg)
+            else:
+                self.notifications.warnings = [
+                    w for w in self.notifications.warnings if not w.startswith("Notification evaluation failed: ")
+                ]
+            finally:
+                self._last_notification_eval = time.monotonic()
 
     def _take_log_error(self, text):
         if getattr(self.connector, "log_file_error", False):
@@ -352,6 +367,7 @@ class Desk:
         return result
 
     def payload(self, result=None):
+        self._evaluate_notifications(min_interval=self._eval_interval_seconds)
         connector = self.connector
         kg = connector.kg()
         pieces = connector.pieces()
@@ -429,7 +445,8 @@ class Desk:
             "inbox_files": [item.name for item in list_inbox()],
             "exceptions": exception_view.exception_list(connector),
             "health": exception_view.safe_health(connector),
-            "notifications": list(self.notifications.notices),
+            "notifications": list(self.notifications.notices[-100:]),
+            "notifications_count": len(self.notifications.notices),
             "notifications_warning": "; ".join(self.notifications.warnings),
         }
 
@@ -950,6 +967,9 @@ function paintExceptions() {
     '<pre id="payload-box" class="muted"></pre></section>' +
     '<section class="panel" style="margin-top:12px"><h2>Notifications</h2>' +
     (state.notifications_warning ? '<p class="muted">' + esc(state.notifications_warning) + "</p>" : "") +
+    ((state.notifications_count || 0) > (state.notifications || []).length
+      ? '<p class="muted">Showing latest ' + esc((state.notifications || []).length) + " of " + esc(state.notifications_count) + " notifications.</p>"
+      : "") +
     ((state.notifications || []).length
       ? "<table><tr><th>Recipient</th><th>Type</th><th>Code</th><th>Row</th><th>Work order</th><th>Time</th><th>Message</th></tr>" +
         (state.notifications || []).map(function (n) {
