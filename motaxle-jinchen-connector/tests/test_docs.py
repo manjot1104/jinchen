@@ -117,23 +117,23 @@ class PocFindings(unittest.TestCase):
 
     def setUp(self):
         self.text = read(DOCS / "poc-findings.md")
-        self.stories = re.findall(r"^\| (US-\d{3}) \| [^|]+ \| (Must|Should|Could) \| (\w+) \| (PRI-\d+|-) \|", self.text, re.M)
+        self.stories = re.findall(r"^\| (US-\d{3}) \| [^|]+ \| (Must|Should|Could) \| (Done|Open|On hold|Canceled) \| (PRI-\d+|-) \|", self.text, re.M)
 
     def test_every_story_appears_once(self):
         ids = [story for story, _, _, _ in self.stories]
         self.assertEqual(ids, ["US-%03d" % n for n in range(1, 92)])
 
     def test_the_summary_matches_the_story_table(self):
-        summary = dict(re.findall(r"^\| (Done|Open|Blocked|Waits|Canceled) \| (\d+) \|", self.text, re.M))
+        summary = dict(re.findall(r"^\| (Done|Open|On hold|Canceled) \| (\d+) \|", self.text, re.M))
         counted = {}
         for _, _, state, _ in self.stories:
             counted[state] = counted.get(state, 0) + 1
         self.assertEqual({state: int(n) for state, n in summary.items()}, counted)
         self.assertIn("| **Total** | **%d** |" % len(self.stories), self.text)
 
-    def test_stories_outside_linear_are_the_blocked_ones(self):
+    def test_stories_outside_linear_are_the_ones_on_hold(self):
         for story, _, state, linear in self.stories:
-            self.assertEqual(linear == "-", state in ("Blocked", "Waits"), story)
+            self.assertEqual(linear == "-", state == "On hold", story)
 
     def test_the_code_count_matches_the_contract(self):
         codes = set(re.findall(r"E-[A-Z]+", read(DOCS / "message-contract.md")))
