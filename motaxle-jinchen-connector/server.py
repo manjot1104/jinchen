@@ -36,12 +36,13 @@ LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "inbox", "lo
 
 
 class Desk:
-    def __init__(self, weight=None, log_path=None, reload_config=None):
+    def __init__(self, weight=None, log_path=None, reload_config=None, retry_config=None):
         self._fixed_weight = weight
         self._reload_config = (weight is None) if reload_config is None else bool(reload_config)
+        self._retry_config = retry_config
         self.weight = weight
         self.log_path = log_path
-        self.connector = Connector(weight=self.weight, log_path=self.log_path)
+        self.connector = Connector(weight=self.weight, log_path=self.log_path, retry_config=self._retry_config)
         self.attempts = [
             {
                 "id": row.attempt_id or row.ref,
@@ -69,7 +70,9 @@ class Desk:
         config_error = None
         if self._reload_config:
             try:
-                self.weight = load_config()["weight"]
+                loaded_cfg = load_config()
+                self.weight = loaded_cfg["weight"]
+                self._retry_config = loaded_cfg.get("retry")
             except (ConfigError, OSError) as exc:
                 config_error = str(exc)
         else:
@@ -121,7 +124,7 @@ class Desk:
                     pass
 
         path_to_use = self.log_path if cleared else None
-        self.connector = Connector(weight=self.weight, log_path=path_to_use)
+        self.connector = Connector(weight=self.weight, log_path=path_to_use, retry_config=self._retry_config)
         # Item 12: Dropped self.connector.ledger._n = 0
         if cleared and self.connector.counter_path and self.connector.counter_path.exists():
             try:
@@ -1251,7 +1254,7 @@ def main():
         print(str(exc), flush=True)
         print("The desk did not start.", flush=True)
         return 1
-    DESK = Desk(weight=config["weight"], log_path=LOG_PATH, reload_config=True)
+    DESK = Desk(weight=config["weight"], log_path=LOG_PATH, reload_config=True, retry_config=config.get("retry"))
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     print("Open http://%s:%d" % (HOST, PORT), flush=True)
     print("Ctrl+C stops it.", flush=True)

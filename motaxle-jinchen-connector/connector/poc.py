@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import time
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime
 from pathlib import Path
@@ -287,10 +288,13 @@ class Connector:
     """Connector processes Jinchen messages against ERPNext stock.
     Note: not thread-safe; use external synchronization for concurrent calls.
     """
-    def __init__(self, mode="test", live_password="", weight=None, log_path=None, results_dir=None):
+    def __init__(self, mode="test", live_password="", weight=None, log_path=None, results_dir=None, retry_config=None, sleeper=None):
+        from connector.retry import validate_retry_config
         require_test_mode(mode, live_password)
         self.mode = mode
         self.weight = _validate_connector_weight(weight)
+        self.retry_config = validate_retry_config(retry_config)
+        self.sleeper = sleeper or time.sleep
         self.log_path = log_path
         self.ledger_path = Path(log_path).with_name("ledger.jsonl") if log_path else None
         self.counter_path = Path(log_path).with_name(".ste_counter") if log_path else None
@@ -711,7 +715,7 @@ class Connector:
         self._log(ref, work_order, kind, status, code, document, drop_log=drop_log, quantities=quantities, attempt_id=attempt_id, entry=entry)
         return Result(status, code, document, message)
 
-    def process(self, message, drop_log=False, attempt_id=""):
+    def process(self, message, drop_log=False, attempt_id="", transport=None):
         self._attempt_id = attempt_id
         self._message = None
         try:
@@ -795,10 +799,177 @@ class Connector:
                 return self._done("Business Rejected", "E-OP", "", "Operation is not on the demo route.", ref, work_order, kind, drop_log)
             if op is not None:
                 message["operation"] = op
+            if transport is not None:
+                return self._process_with_transport(
+                    message,
+                    ref,
+                    work_order,
+                    kind,
+                    transport,
+                    drop_log=drop_log,
+                    attempt_id=attempt_id,
+                )
             return handler(message, drop_log)
         finally:
             self._attempt_id = ""
             self._message = None
+
+    def _process_with_transport(
+        self,
+        message,
+        ref,
+        work_order,
+        kind,
+        transport,
+        drop_log=False,
+        attempt_id="",
+    ):
+        from connector.retry import TIMEOUT_CODE, TRANSIENT_EXCEPTIONS, classify_failure, next_retry_delay
+
+        key = _repeat_key(ref, work_order, kind, message)
+        if self._replay_of == -1 and key:
+            for old in reversed(self.log):
+                if old.repeat_key == key:
+                    if old.status in ("Dead", "Business Rejected"):
+                        return Result(
+                            old.status,
+                            old.code,
+                            old.document,
+                            "Already in terminal status; not resent.",
+                        )
+                    if old.status == "Technical Failed" and classify_failure(status=old.status, code=old.code) != "retryable":
+                        return Result(
+                            old.status,
+                            old.code,
+                            old.document,
+                            "Already in terminal status; not resent.",
+                        )
+                    break
+
+        max_retries = self.retry_config["max_retries"]
+        for attempt_index in range(max_retries + 1):
+            if attempt_index > 0:
+                self.sleeper(next_retry_delay(self.retry_config, attempt_index - 1))
+            try:
+                raw = transport(message)
+            except Exception as exc:
+                code = TIMEOUT_CODE if isinstance(exc, TRANSIENT_EXCEPTIONS) else ""
+                kind_cls = classify_failure(code=code, exc=exc)
+                msg_text = (
+                    "Transient connection failure."
+                    if kind_cls == "retryable"
+                    else "Transport error."
+                )
+                if kind_cls == "retryable" and attempt_index < max_retries:
+                    self._log(
+                        ref,
+                        work_order,
+                        kind,
+                        "Technical Failed",
+                        code,
+                        "",
+                        drop_log=drop_log,
+                        attempt_id=attempt_id,
+                    )
+                    continue
+                final_status = "Dead" if kind_cls == "retryable" else "Technical Failed"
+                return self._done(
+                    final_status,
+                    code,
+                    "",
+                    msg_text,
+                    ref,
+                    work_order,
+                    kind,
+                    drop_log=drop_log,
+                    attempt_id=attempt_id,
+                )
+
+            if isinstance(raw, Result):
+                res_status = raw.status
+                res_code = raw.code
+                res_doc = raw.document
+                res_msg = raw.message
+            elif isinstance(raw, dict):
+                res_status = str(raw.get("status", ""))
+                res_code = str(raw.get("code", ""))
+                res_doc = str(raw.get("document", ""))
+                res_msg = str(raw.get("message", ""))
+            else:
+                return self._done(
+                    "Technical Failed",
+                    "",
+                    "",
+                    "Invalid transport response.",
+                    ref,
+                    work_order,
+                    kind,
+                    drop_log=drop_log,
+                    attempt_id=attempt_id,
+                )
+
+            if res_status == "Posted":
+                return self._done(
+                    "Posted",
+                    res_code,
+                    res_doc,
+                    res_msg or "Posted.",
+                    ref,
+                    work_order,
+                    kind,
+                    drop_log=drop_log,
+                    attempt_id=attempt_id,
+                )
+
+            kind_cls = classify_failure(status=res_status, code=res_code)
+            if kind_cls == "retryable":
+                msg_text = res_msg or "Technical timeout."
+                if attempt_index < max_retries:
+                    self._log(
+                        ref,
+                        work_order,
+                        kind,
+                        "Technical Failed",
+                        res_code,
+                        "",
+                        drop_log=drop_log,
+                        attempt_id=attempt_id,
+                    )
+                    continue
+                return self._done(
+                    "Dead",
+                    res_code,
+                    "",
+                    msg_text,
+                    ref,
+                    work_order,
+                    kind,
+                    drop_log=drop_log,
+                    attempt_id=attempt_id,
+                )
+            if kind_cls == "business":
+                return self._done(
+                    "Business Rejected",
+                    res_code,
+                    "",
+                    res_msg or "Business rejected.",
+                    ref,
+                    work_order,
+                    kind,
+                    drop_log=drop_log,
+                    attempt_id=attempt_id,
+                )
+            return self._done(
+                "Technical Failed",
+                res_code,
+                "",
+                res_msg or "Technical failure.",
+                ref,
+                work_order,
+                kind,
+                drop_log=drop_log,
+                attempt_id=attempt_id,
+            )
 
     def _issue(self, message, drop_log):
         ref = message["id"]

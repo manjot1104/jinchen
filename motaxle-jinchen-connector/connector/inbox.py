@@ -7,6 +7,7 @@ import shutil
 import tempfile
 from pathlib import Path
 
+from connector.retry import validate_retry_config
 from connector.poc import DEFAULT_WEIGHT, ConfigError, require_test_mode
 
 
@@ -20,9 +21,9 @@ CONFIG_PATH = PROJECT_ROOT / "config.json"
 def load_config(path=None):
     """Read config.json and refuse to continue unless test mode is clean.
 
-    Returns {"mode": ..., "live_password": ..., "weight": {...}}. The weight
-    block (US-081) is optional; a missing key takes DEFAULT_WEIGHT. Raises
-    ConfigError with the
+    Returns {"mode": ..., "live_password": ..., "weight": {...}, "retry": {...}}.
+    The weight (US-081) and retry (US-027) blocks are optional; missing keys
+    take DEFAULT_WEIGHT and DEFAULT_RETRY. Raises ConfigError with the
     sentences already in connector.poc when the mode is wrong or a live
     password is set in test mode. The password is never printed.
     """
@@ -39,7 +40,12 @@ def load_config(path=None):
     mode = data.get("mode")
     live_password = data.get("live_password") or ""
     require_test_mode(mode, live_password)
-    return {"mode": mode, "live_password": live_password, "weight": _weight(data.get("weight"))}
+    return {
+        "mode": mode,
+        "live_password": live_password,
+        "weight": _weight(data.get("weight")),
+        "retry": validate_retry_config(data.get("retry")),
+    }
 
 
 WEIGHT_SENTENCE = "config.json weight needs kg_per_piece above 0 and loss_allowance from 0 to 1."
